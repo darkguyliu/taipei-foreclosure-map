@@ -7,7 +7,7 @@ import database
 _TEST_DB = "file:testdb_ops?mode=memory&cache=shared&uri=true"
 database.DB_PATH = _TEST_DB
 
-from database import init_db, upsert_property, upsert_avg_price, upsert_cache_meta, get_properties, get_avg_prices
+from database import init_db, get_connection, upsert_property, upsert_avg_price, upsert_cache_meta, get_properties, get_avg_prices
 
 # Keep a persistent connection open so the shared in-memory database
 # is not destroyed between init_db() and the test queries.
@@ -16,8 +16,14 @@ _keeper = sqlite3.connect(_TEST_DB, uri=True, check_same_thread=False)
 
 @pytest.fixture(autouse=True)
 def fresh_db():
-    """Re-initialize schema before each test to isolate state."""
+    """Re-initialize schema and clear data before each test to isolate state."""
     init_db()
+    conn = get_connection()
+    conn.execute("DELETE FROM properties")
+    conn.execute("DELETE FROM avg_prices")
+    conn.execute("DELETE FROM cache_meta")
+    conn.commit()
+    conn.close()
     yield
 
 

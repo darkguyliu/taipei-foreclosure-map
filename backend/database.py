@@ -91,6 +91,9 @@ def upsert_property(prop: Dict) -> None:
                  :auction_count, :auction_date, :auction_url,
                  datetime('now', 'localtime'))
             ON CONFLICT(case_number) DO UPDATE SET
+                court=excluded.court,
+                address=excluded.address,
+                address_norm=excluded.address_norm,
                 lat=excluded.lat, lng=excluded.lng,
                 floor_price=excluded.floor_price, area=excluded.area,
                 property_type=excluded.property_type,
