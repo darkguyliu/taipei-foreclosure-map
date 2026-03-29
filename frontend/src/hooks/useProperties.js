@@ -11,11 +11,12 @@ export function useProperties(district, filters = {}) {
     if (!district) return
     setLoading(true)
     setError(null)
+    setProperties([])
     const params = new URLSearchParams({ district })
-    if (filters.minPrice) params.set('min_price', filters.minPrice)
-    if (filters.maxPrice) params.set('max_price', filters.maxPrice)
-    if (filters.auctionCount) params.set('auction_count', filters.auctionCount)
-    if (filters.propertyType && filters.propertyType !== 'all')
+    if (filters.minPrice != null) params.set('min_price', filters.minPrice)
+    if (filters.maxPrice != null) params.set('max_price', filters.maxPrice)
+    if (filters.auctionCount != null) params.set('auction_count', filters.auctionCount)
+    if (filters.propertyType != null && filters.propertyType !== 'all')
       params.set('property_type', filters.propertyType)
 
     fetch(`/api/properties?${params}`)
