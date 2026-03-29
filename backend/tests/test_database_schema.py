@@ -41,5 +41,6 @@ def test_avg_prices_unique_constraint():
             "VALUES (?, ?, ?, ?)",
             ("大安區", "住宅", 90.0, 50),
         )
-        conn.commit()
+    # conn.commit() would auto-rollback after the IntegrityError anyway;
+    # calling close() is sufficient here.
     conn.close()

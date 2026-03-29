@@ -73,4 +73,5 @@ def init_db():
             CREATE INDEX IF NOT EXISTS idx_properties_address_norm
                 ON properties(address_norm);
         """)
+    conn.commit()
     conn.close()
