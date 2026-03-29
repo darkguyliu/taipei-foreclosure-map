@@ -1,8 +1,8 @@
 import { Map, AdvancedMarker, InfoWindow, useMap } from '@vis.gl/react-google-maps'
 import { useEffect } from 'react'
+import { AUCTION_COLORS } from '../constants'
 
 const TAIPEI_CENTER = { lat: 25.0478, lng: 121.5319 }
-const AUCTION_COLORS = { 1: '#4a8fd4', 2: '#f4a430', 3: '#ff6b6b' }
 
 function MarkerPin({ color }) {
   return (

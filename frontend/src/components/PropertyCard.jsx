@@ -1,4 +1,4 @@
-const AUCTION_COLORS = { 1: '#4a8fd4', 2: '#f4a430', 3: '#ff6b6b' }
+import { AUCTION_COLORS } from '../constants'
 
 export function PropertyCard({ property, isSelected, isFavorite, onSelect, onToggleFavorite }) {
   const color = AUCTION_COLORS[property.auction_count] || '#ff6b6b'

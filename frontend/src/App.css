@@ -112,7 +112,7 @@
 
 /* Sidebar */
 .sidebar {
-  width: 380px;
+  width: 38%;
   flex-shrink: 0;
   background: #13131f;
   border-right: 1px solid #2a2a3a;
