@@ -1,25 +1,56 @@
 import { Map, AdvancedMarker, InfoWindow, useMap } from '@vis.gl/react-google-maps'
 import { useEffect } from 'react'
-import { AUCTION_COLORS } from '../constants'
+import { AUCTION_COLORS, DISTRICT_CENTERS } from '../constants'
 
 const TAIPEI_CENTER = { lat: 25.0478, lng: 121.5319 }
+const DISTRICT_ZOOM = 15
 
-function MarkerPin({ color }) {
+function MarkerPin({ color, label }) {
   return (
     <div style={{
-      width: 16, height: 16,
-      background: color,
-      borderRadius: '50% 50% 50% 0',
-      transform: 'rotate(-45deg)',
-      border: '2px solid white',
-      boxShadow: `0 0 6px ${color}`,
-    }} />
+      display: 'flex',
+      flexDirection: 'column',
+      alignItems: 'center',
+      cursor: 'pointer',
+    }}>
+      <div style={{
+        background: color,
+        color: '#fff',
+        fontWeight: 700,
+        fontSize: 13,
+        width: 32,
+        height: 32,
+        borderRadius: '50% 50% 50% 0',
+        transform: 'rotate(-45deg)',
+        border: '3px solid white',
+        boxShadow: `0 2px 8px rgba(0,0,0,0.4), 0 0 12px ${color}80`,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+      }}>
+        <span style={{ transform: 'rotate(45deg)' }}>{label}</span>
+      </div>
+    </div>
   )
 }
 
-export function MapView({ properties, selectedProperty, onSelectProperty, isFavorite, toggleFavorite, getAvgPrice }) {
+export function MapView({ district, properties, selectedProperty, onSelectProperty, isFavorite, toggleFavorite, getAvgPrice }) {
   const map = useMap()
 
+  // Center map on district change
+  useEffect(() => {
+    if (!map) return
+    const center = DISTRICT_CENTERS[district]
+    if (center) {
+      map.panTo(center)
+      map.setZoom(DISTRICT_ZOOM)
+    } else {
+      map.panTo(TAIPEI_CENTER)
+      map.setZoom(13)
+    }
+  }, [district, map])
+
+  // Pan to selected property
   useEffect(() => {
     if (selectedProperty && map) {
       map.panTo({ lat: selectedProperty.lat, lng: selectedProperty.lng })
@@ -41,7 +72,10 @@ export function MapView({ properties, selectedProperty, onSelectProperty, isFavo
             position={{ lat: p.lat, lng: p.lng }}
             onClick={() => onSelectProperty(p)}
           >
-            <MarkerPin color={AUCTION_COLORS[p.auction_count] || '#ff6b6b'} />
+            <MarkerPin
+              color={AUCTION_COLORS[p.auction_count] || AUCTION_COLORS[3]}
+              label={p.auction_count}
+            />
           </AdvancedMarker>
         ))}
 
@@ -98,7 +132,7 @@ function PropertyInfoWindow({ property, isFavorite, onToggleFavorite, getAvgPric
         </button>
         {property.auction_url && (
           <a href={property.auction_url} target="_blank" rel="noreferrer">
-            🔗 司法院公告
+            🔗 公告文件
           </a>
         )}
       </div>

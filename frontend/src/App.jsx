@@ -76,6 +76,7 @@ export default function App() {
             getAvgPrice={getAvgPrice}
           />
           <MapView
+            district={district}
             properties={properties}
             selectedProperty={selectedProperty}
             onSelectProperty={setSelectedProperty}

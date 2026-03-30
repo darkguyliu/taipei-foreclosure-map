@@ -1,6 +1,6 @@
 """
-Scrapes 司法院拍賣公告 (aomp109.judicial.gov.tw).
-The site uses a POST form for search. Results are paginated.
+Scrapes 法務部行政執行署拍賣公告查詢系統 (tpkonsale.moj.gov.tw).
+Uses GET /Estate/Query with CAPTCHA (code returned in API response).
 """
 import logging
 import re
@@ -10,7 +10,7 @@ from property_type_mapper import normalize_property_type
 
 logger = logging.getLogger(__name__)
 
-BASE_URL = "https://aomp109.judicial.gov.tw/judbp/wkw/WHD1A02.htm"
+BASE_URL = "https://www.tpkonsale.moj.gov.tw"
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -19,53 +19,135 @@ HEADERS = {
     )
 }
 
-
-def _roc_to_ad_date(roc_date: str) -> str:
-    """Convert ROC date '114/02/21' to AD '2025-02-21'."""
-    parts = roc_date.strip().split("/")
-    if len(parts) != 3:
-        return roc_date
-    year = int(parts[0]) + 1911
-    return f"{year}-{parts[1].zfill(2)}-{parts[2].zfill(2)}"
-
-
-def _parse_price(text: str) -> int:
-    """Parse '12,000,000' → 12000000."""
-    return int(re.sub(r"[^\d]", "", text))
+# District name → area code mapping for Taipei (county code "A")
+DISTRICT_AREA_CODES = {
+    "松山區": "01", "大安區": "02", "中正區": "03",
+    "萬華區": "05", "大同區": "09", "中山區": "10",
+    "文山區": "11", "南港區": "13", "內湖區": "14",
+    "士林區": "15", "北投區": "16", "信義區": "17",
+}
 
 
-def _parse_area(text: str) -> float:
-    """Parse '35.70坪' → 35.70."""
-    match = re.search(r"[\d.]+", text)
-    return float(match.group()) if match else 0.0
+def _parse_auction_count(text: str) -> int:
+    """Extract auction count from text like '2021/11/02 15:00:00第三拍'."""
+    cn_num = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6}
+    m = re.search(r"第([一二三四五六七八九十\d])拍", text)
+    if m:
+        ch = m.group(1)
+        return cn_num.get(ch, int(ch) if ch.isdigit() else 1)
+    if "特別變賣" in text or "四拍" in text:
+        return 4
+    return 1
+
+
+def _parse_auction_date(text: str) -> str:
+    """Extract date from text like '2021/11/02 15:00:00第三拍' → '2021-11-02'."""
+    m = re.search(r"(\d{4})/(\d{2})/(\d{2})", text)
+    if m:
+        return f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
+    return ""
+
+
+def _extract_address(td) -> str:
+    """Extract the address from the description cell's Google Maps link."""
+    for a in td.find_all("a"):
+        href = a.get("href", "")
+        if "google" in href and "maps" in href:
+            return a.get_text(strip=True)
+    return ""
+
+
+def _extract_price(description_text: str) -> int:
+    """Extract 底價 (reserve price) from description text."""
+    m = re.search(r"底價[：:]\s*([\d,]+)", description_text)
+    if m:
+        return int(re.sub(r"[^\d]", "", m.group(1)))
+    return 0
+
+
+def _extract_area_ping(description_text: str) -> float:
+    """Extract area in 坪 from description text."""
+    m = re.search(r"面積[：:]\s*([\d,.]+)\s*坪", description_text)
+    if m:
+        return float(m.group(1).replace(",", ""))
+    return 0.0
+
+
+def _extract_auction_url(td) -> str:
+    """Extract the PDF download link from the description cell."""
+    for a in td.find_all("a"):
+        href = a.get("href", "")
+        if "/File/Download" in href:
+            return f"{BASE_URL}{href}"
+    return ""
+
+
+def _extract_sold_price(text: str) -> int:
+    """Extract sold price from td[5] text like '110/11/021,396,800'."""
+    # Format: ROC-date followed by price digits with commas
+    m = re.search(r"\d{3}/\d{2}/\d{2}([\d,]+)", text)
+    if m:
+        return int(re.sub(r"[^\d]", "", m.group(1)))
+    return 0
 
 
 def parse_auction_rows(html: str, district: str) -> list:
-    """Parse table rows from auction result HTML. Only returns rows matching district."""
+    """Parse table rows from query result HTML."""
     soup = BeautifulSoup(html, "html.parser")
-    table = soup.find("table", class_="tableAuction")
-    if not table:
+    tables = soup.find_all("table")
+    if len(tables) < 2:
         return []
 
+    data_table = tables[1]
     rows = []
-    for tr in table.find_all("tr"):
+    for tr in data_table.find_all("tr"):
         tds = tr.find_all("td")
-        if len(tds) < 9:
+        if len(tds) < 7:
             continue
-        address = tds[2].get_text(strip=True)
-        if district not in address:
+
+        # td[1]: case number + branch
+        case_text = tds[1].get_text(strip=True)
+        case_match = re.match(r"(\d+)", case_text)
+        case_number = case_match.group(1) if case_match else case_text
+        court_match = re.search(r"\((.+?)\)", case_text)
+        court = court_match.group(1) if court_match else ""
+
+        # td[2]: auction date + count
+        date_count_text = tds[2].get_text(strip=True)
+        auction_date = _parse_auction_date(date_count_text)
+        auction_count = _parse_auction_count(date_count_text)
+
+        # td[6]: description with address, price, area, PDF link
+        desc_td = tds[6]
+        desc_text = desc_td.get_text(strip=True)
+        address = _extract_address(desc_td)
+        if not address:
             continue
-        link_tag = tds[8].find("a")
-        auction_url = f"https://aomp109.judicial.gov.tw{link_tag['href']}" if link_tag else ""
+
+        # Ensure address has district prefix for geocoding
+        if not address.startswith("臺北市") and not address.startswith("台北市"):
+            address = f"台北市{district}{address}"
+
+        floor_price = _extract_price(desc_text)
+        # Fallback: use sold price from td[5] if no 底價 found
+        if floor_price == 0:
+            floor_price = _extract_sold_price(tds[5].get_text(strip=True))
+
+        area = _extract_area_ping(desc_text)
+        auction_url = _extract_auction_url(desc_td)
+
+        # Determine property type from description
+        property_type = normalize_property_type(desc_text)
+
         rows.append({
-            "case_number": tds[0].get_text(strip=True),
-            "court": tds[1].get_text(strip=True),
+            "case_number": case_number,
+            "court": court,
             "address": address,
-            "property_type": normalize_property_type(tds[3].get_text(strip=True)),
-            "area": _parse_area(tds[4].get_text(strip=True)),
-            "floor_price": _parse_price(tds[5].get_text(strip=True)),
-            "auction_count": int(re.sub(r"[^\d]", "", tds[6].get_text(strip=True)) or 1),
-            "auction_date": _roc_to_ad_date(tds[7].get_text(strip=True)),
+            "property_type": property_type,
+            "area": area,
+            "floor_price": floor_price,
+            "auction_count": auction_count,
+            "auction_date": auction_date,
             "auction_url": auction_url,
             "district": district,
         })
@@ -74,28 +156,44 @@ def parse_auction_rows(html: str, district: str) -> list:
 
 def scrape_district(district: str) -> list:
     """
-    Fetch all auction listings for a Taipei district.
-    Raises requests.RequestException on connection failure (caller handles).
+    Fetch all auction listings for a Taipei district from 法務部行政執行署.
     """
-    payload = {
-        "cityCode": "63",   # 台北市
-        "townCode": "",
-        "keyword": district,
-        "page": "1",
-    }
+    area_code = DISTRICT_AREA_CODES.get(district, "")
+    if not area_code:
+        logger.warning("Unknown district: %s", district)
+        return []
+
+    session = requests.Session()
+    session.headers.update(HEADERS)
+
+    # Visit main page to initialize session
+    session.get(f"{BASE_URL}/", timeout=15)
+
+    # Get CAPTCHA (the API conveniently returns the code)
+    captcha_resp = session.get(f"{BASE_URL}/Home/Captcha", timeout=15)
+    captcha_code = captcha_resp.json()["code"]
+
     all_rows = []
     page = 1
     while True:
-        payload["page"] = str(page)
-        resp = requests.post(BASE_URL, data=payload, headers=HEADERS, timeout=20)
+        params = {
+            "COUNTY": "A",  # 台北市
+            "AREA": area_code,
+            "CAPTCHA": captcha_code,
+            "REQUERY": "false" if page == 1 else "true",
+            "PAGINATION_PAGE_NO": str(page),
+        }
+        resp = session.get(f"{BASE_URL}/Estate/Query", params=params, timeout=20)
         resp.raise_for_status()
+
         rows = parse_auction_rows(resp.text, district)
         all_rows.extend(rows)
-        # Stop if last page (no new rows or explicit end marker)
+
         if not rows:
             break
         page += 1
         if page > 20:  # safety cap
             break
+
     logger.info("Scraped %d rows for %s", len(all_rows), district)
     return all_rows
