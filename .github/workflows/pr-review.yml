@@ -23,7 +23,7 @@ jobs:
       - name: Configure GitHub MCP
         run: |
           claude mcp add --transport http github https://api.githubcopilot.com/mcp/ \
-            --header "Authorization: Bearer ${{ secrets.GITHUB_MCP_PAT }}"
+            --header "Authorization: Bearer ${{ secrets.MCP_PAT }}"
 
       - name: Run Claude review (headless)
         id: review
