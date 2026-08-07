@@ -56,16 +56,64 @@ jobs:
             --repo ${{ github.repository }} \
             --body-file review_output.txt
 
-      - name: Send to Slack
+      - name: Send to Slack (Block Kit)
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
           PR_URL: ${{ github.event.pull_request.html_url }}
           PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          REPO: ${{ github.repository }}
         run: |
-          REVIEW_CONTENT=$(cat review_output.txt | sed 's/"/\\"/g' | awk '{printf "%s\\n", $0}')
+          # Slack section block 的文字上限是 3000 字元，超過就截斷避免 400 錯誤
+          REVIEW_CONTENT=$(head -c 2800 review_output.txt)
+          if [ $(wc -c < review_output.txt) -gt 2800 ]; then
+            REVIEW_CONTENT="${REVIEW_CONTENT}...\n\n(內容過長，完整版請看 PR comment)"
+          fi
+
+          # 用 jq 組 JSON，避免手動跳脫特殊字元出錯
+          PAYLOAD=$(jq -n \
+            --arg title ":mag: Claude PR Review" \
+            --arg repo "$REPO" \
+            --arg pr_title "$PR_TITLE" \
+            --arg pr_author "$PR_AUTHOR" \
+            --arg pr_url "$PR_URL" \
+            --arg review "$REVIEW_CONTENT" \
+            '{
+              blocks: [
+                {
+                  type: "header",
+                  text: { type: "plain_text", text: $title, emoji: true }
+                },
+                {
+                  type: "section",
+                  fields: [
+                    { type: "mrkdwn", text: ("*Repo:*\n" + $repo) },
+                    { type: "mrkdwn", text: ("*Author:*\n" + $pr_author) }
+                  ]
+                },
+                {
+                  type: "section",
+                  text: { type: "mrkdwn", text: ("*<" + $pr_url + "|" + $pr_title + ">*") }
+                },
+                { type: "divider" },
+                {
+                  type: "section",
+                  text: { type: "mrkdwn", text: $review }
+                },
+                {
+                  type: "actions",
+                  elements: [
+                    {
+                      type: "button",
+                      text: { type: "plain_text", text: "查看 PR" },
+                      url: $pr_url,
+                      style: "primary"
+                    }
+                  ]
+                }
+              ]
+            }')
 
           curl -X POST -H 'Content-type: application/json' \
-            --data "{
-              \"text\": \"*Claude PR Review*: <${PR_URL}|${PR_TITLE}>\n\n${REVIEW_CONTENT}\"
-            }" \
+            --data "$PAYLOAD" \
             "$SLACK_WEBHOOK_URL"
