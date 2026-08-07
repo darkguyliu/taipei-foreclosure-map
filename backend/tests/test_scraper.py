@@ -1,5 +1,5 @@
 import pytest
-from scraper import parse_auction_rows, _parse_auction_count, _parse_auction_date
+from scraper import parse_auction_rows, _parse_auction_count, _parse_auction_date, scrape_district
 
 SAMPLE_HTML = """
 <table><tr><td>12下一頁</td></tr></table>
@@ -83,3 +83,19 @@ def test_parse_auction_count_variants():
 def test_parse_auction_date():
     assert _parse_auction_date("2021/11/02 15:00:00第三拍") == "2021-11-02"
     assert _parse_auction_date("2025/01/07 15:00:00特別變賣") == "2025-01-07"
+
+
+def test_parse_infers_new_taipei_prefix_from_district():
+    rows = parse_auction_rows(SAMPLE_HTML, district="板橋區")
+    # Row without an explicit city prefix in the source HTML gets 新北市, not 台北市
+    assert rows[1]["address"] == "新北市板橋區仁愛路四段345巷5弄9號地下室"
+
+
+def test_parse_keeps_existing_city_prefix():
+    rows = parse_auction_rows(SAMPLE_HTML, district="板橋區")
+    # Row that already carries a 臺北市 prefix in the source HTML is left untouched
+    assert rows[0]["address"] == "臺北市大安區信義路三段186號5樓"
+
+
+def test_scrape_district_unknown_district_returns_empty():
+    assert scrape_district("不存在區") == []

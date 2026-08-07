@@ -1,5 +1,5 @@
 // frontend/src/components/DistrictSelector.jsx
-import { TAIPEI_DISTRICTS } from '../constants'
+import { DISTRICT_GROUPS } from '../constants'
 
 export function DistrictSelector({ selected, onChange }) {
   return (
@@ -11,8 +11,12 @@ export function DistrictSelector({ selected, onChange }) {
         onChange={e => onChange(e.target.value)}
       >
         <option value="">-- 請選擇 --</option>
-        {TAIPEI_DISTRICTS.map(d => (
-          <option key={d} value={d}>{d}</option>
+        {DISTRICT_GROUPS.map(group => (
+          <optgroup key={group.city} label={group.city}>
+            {group.districts.map(d => (
+              <option key={d} value={d}>{d}</option>
+            ))}
+          </optgroup>
         ))}
       </select>
     </div>

@@ -50,7 +50,7 @@ export default function App() {
     <APIProvider apiKey={MAPS_API_KEY}>
       <div className="app-layout">
         <header className="app-header">
-          <span className="app-title">🏠 台北法拍屋地圖</span>
+          <span className="app-title">🏠 雙北法拍屋地圖</span>
           <DistrictSelector selected={district} onChange={setDistrict} />
           {district && (
             <button className="refresh-btn" onClick={handleRefresh}>
