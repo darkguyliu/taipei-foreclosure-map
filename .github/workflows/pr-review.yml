@@ -67,7 +67,7 @@ jobs:
           # Slack section block 的文字上限是 3000 字元，超過就截斷避免 400 錯誤
           REVIEW_CONTENT=$(head -c 2800 review_output.txt)
           if [ $(wc -c < review_output.txt) -gt 2800 ]; then
-            REVIEW_CONTENT="${REVIEW_CONTENT}...\n\n(內容過長，完整版請看 PR comment)"
+            REVIEW_CONTENT=$(printf '%s...\n\n(內容過長，完整版請看 PR comment)' "$REVIEW_CONTENT")
           fi
 
           # 用 jq 組 JSON，避免手動跳脫特殊字元出錯
