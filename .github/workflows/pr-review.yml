@@ -1,0 +1,71 @@
+name: Claude PR Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  claude-review:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Claude Code
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Configure GitHub MCP
+        run: |
+          claude mcp add --transport http github https://api.githubcopilot.com/mcp/ \
+            --header "Authorization: Bearer ${{ secrets.GITHUB_MCP_PAT }}"
+
+      - name: Run Claude review (headless)
+        id: review
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          claude -p "透過 GitHub MCP 讀取 ${REPO} PR #${PR_NUMBER} 的 diff。
+          針對安全性、邏輯錯誤、效能問題、程式風格做 code review。
+          用繁體中文輸出，格式為：
+          ## 摘要
+          一到兩句總評
+
+          ## 發現問題
+          - [嚴重度: 高/中/低] 檔案:行號 - 問題描述與建議
+
+          如果沒有問題就明確說『沒有發現需要修改的問題』。
+          不要輸出其他多餘文字，只要上述格式的內容。" \
+          --dangerously-skip-permissions \
+          --output-format text > review_output.txt
+
+          cat review_output.txt
+
+      - name: Post review to PR comment
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh pr comment ${{ github.event.pull_request.number }} \
+            --repo ${{ github.repository }} \
+            --body-file review_output.txt
+
+      - name: Send to Slack
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          REVIEW_CONTENT=$(cat review_output.txt | sed 's/"/\\"/g' | awk '{printf "%s\\n", $0}')
+
+          curl -X POST -H 'Content-type: application/json' \
+            --data "{
+              \"text\": \"*Claude PR Review*: <${PR_URL}|${PR_TITLE}>\n\n${REVIEW_CONTENT}\"
+            }" \
+            "$SLACK_WEBHOOK_URL"
