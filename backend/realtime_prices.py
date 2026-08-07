@@ -42,7 +42,9 @@ def fetch_avg_prices(district: str) -> List[Dict]:
     try:
         resp = requests.get(api_url, timeout=30)
         resp.raise_for_status()
-        records = csv.DictReader(io.StringIO(resp.content.decode("utf-8-sig")))
+        # Materialize inside the try: csv.DictReader is lazy, so a malformed
+        # row would otherwise raise during the loop below, outside this guard.
+        records = list(csv.DictReader(io.StringIO(resp.content.decode("utf-8-sig"))))
     except Exception as exc:
         logger.warning("Failed to fetch avg prices: %s", exc)
         return []

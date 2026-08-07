@@ -39,11 +39,15 @@ def test_fetch_avg_prices_calculates_correctly():
     assert 住宅_entry["sample_count"] == 2
 
 
-def test_fetch_avg_prices_skips_english_placeholder_row():
-    # The row right after the header is an English column-description row,
-    # not data — it must never leak into the results.
+def test_fetch_avg_prices_skips_non_numeric_price_row():
+    # A row can match the target district yet still carry a non-numeric price
+    # (e.g. malformed feed data) — that specific row must be dropped rather
+    # than raising, without affecting the other valid rows for the district.
+    rows = MOCK_ROWS + [
+        {"鄉鎮市區": "大安區", "建物型態": "住宅大樓", "單價元平方公尺": "not_a_number"},
+    ]
     with patch("realtime_prices.requests.get") as mock_get:
-        mock_get.return_value = _csv_response(MOCK_ROWS)
+        mock_get.return_value = _csv_response(rows)
         results = fetch_avg_prices("大安區")
     total_samples = sum(r["sample_count"] for r in results)
     assert total_samples == len(MOCK_ROWS)
