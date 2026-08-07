@@ -6,6 +6,7 @@ import logging
 import re
 import requests
 from bs4 import BeautifulSoup
+from cities import get_city_for_district, get_county_code, get_area_code, KNOWN_CITY_PREFIXES
 from property_type_mapper import normalize_property_type
 
 logger = logging.getLogger(__name__)
@@ -17,14 +18,6 @@ HEADERS = {
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/123.0.0.0 Safari/537.36"
     )
-}
-
-# District name → area code mapping for Taipei (county code "A")
-DISTRICT_AREA_CODES = {
-    "松山區": "01", "大安區": "02", "中正區": "03",
-    "萬華區": "05", "大同區": "09", "中山區": "10",
-    "文山區": "11", "南港區": "13", "內湖區": "14",
-    "士林區": "15", "北投區": "16", "信義區": "17",
 }
 
 
@@ -91,8 +84,14 @@ def _extract_sold_price(text: str) -> int:
     return 0
 
 
-def parse_auction_rows(html: str, district: str) -> list:
+def _has_city_prefix(address: str) -> bool:
+    """Whether the address already starts with any known city name (any 台/臺 variant)."""
+    return any(address.startswith(prefix) for prefix in KNOWN_CITY_PREFIXES)
+
+
+def parse_auction_rows(html: str, district: str, city: str = None) -> list:
     """Parse table rows from query result HTML."""
+    city = city or get_city_for_district(district) or "台北市"
     soup = BeautifulSoup(html, "html.parser")
     tables = soup.find_all("table")
     if len(tables) < 2:
@@ -124,9 +123,9 @@ def parse_auction_rows(html: str, district: str) -> list:
         if not address:
             continue
 
-        # Ensure address has district prefix for geocoding
-        if not address.startswith("臺北市") and not address.startswith("台北市"):
-            address = f"台北市{district}{address}"
+        # Ensure address has city/district prefix for geocoding
+        if not _has_city_prefix(address):
+            address = f"{city}{district}{address}"
 
         floor_price = _extract_price(desc_text)
         # Fallback: use sold price from td[5] if no 底價 found
@@ -156,10 +155,13 @@ def parse_auction_rows(html: str, district: str) -> list:
 
 def scrape_district(district: str) -> list:
     """
-    Fetch all auction listings for a Taipei district from 法務部行政執行署.
+    Fetch all auction listings for a district from 法務部行政執行署.
+    Supports 台北市 and 新北市 districts (see cities.py).
     """
-    area_code = DISTRICT_AREA_CODES.get(district, "")
-    if not area_code:
+    city = get_city_for_district(district)
+    county_code = get_county_code(district)
+    area_code = get_area_code(district)
+    if not city or not county_code or not area_code:
         logger.warning("Unknown district: %s", district)
         return []
 
@@ -177,7 +179,7 @@ def scrape_district(district: str) -> list:
     page = 1
     while True:
         params = {
-            "COUNTY": "A",  # 台北市
+            "COUNTY": county_code,
             "AREA": area_code,
             "CAPTCHA": captcha_code,
             "REQUERY": "false" if page == 1 else "true",
@@ -186,7 +188,7 @@ def scrape_district(district: str) -> list:
         resp = session.get(f"{BASE_URL}/Estate/Query", params=params, timeout=20)
         resp.raise_for_status()
 
-        rows = parse_auction_rows(resp.text, district)
+        rows = parse_auction_rows(resp.text, district, city)
         all_rows.extend(rows)
 
         if not rows:
