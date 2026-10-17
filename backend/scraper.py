@@ -78,8 +78,22 @@ def _extract_address_fallback(description_text: str) -> str:
     大道 marker followed by a 號) while rejecting any candidate that still
     contains 地號 (land lot number, e.g. "OO段123地號及其上建物") — those
     would geocode to the wrong place rather than a real street address.
+
+    get_text(strip=True) runs all the description's fields together with
+    no separator, so the match also has to stop at the start of the next
+    known field label (not just 底價/面積, which is all the known samples
+    had) — otherwise trailing field text gets appended to the address and
+    sent to geocoding as noise. A blanket "any N Han characters then ："
+    terminator was tried and rejected: it falsely matched inside the
+    address itself (a trailing "號" fusing with the next label's first
+    couple characters, e.g. "...100號底價：" reads as the 3-char label
+    "號底價："), truncating the address before its own house number.
     """
-    m = re.search(r"地址/完整地號[：:]\s*([^，,。]{1,60}?)(?=[，,。]|底價|面積|$)", description_text)
+    stop_labels = "底價|面積|權利範圍|用途|使用分區|建物|持分|使用現況|點交|稅捐"
+    m = re.search(
+        rf"地址/完整地號[：:]\s*([^，,。]{{1,60}}?)(?=[，,。]|(?:{stop_labels})[：:]|$)",
+        description_text,
+    )
     if not m:
         return ""
     candidate = m.group(1).strip()

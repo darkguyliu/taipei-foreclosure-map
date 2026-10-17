@@ -193,6 +193,25 @@ def test_address_fallback_accepts_boulevard_addresses():
     assert _extract_address_fallback(text) == "臺北市中正區市民大道一段100號"
 
 
+def test_address_fallback_stops_at_other_field_labels():
+    # Fields run together with no separator (get_text(strip=True)), so a
+    # label other than 底價/面積 immediately following the address must
+    # still terminate the match instead of being appended as noise.
+    text = "地址/完整地號：臺北市大安區信義路三段186號5樓權利範圍：全部底價：100"
+    assert _extract_address_fallback(text) == "臺北市大安區信義路三段186號5樓"
+
+
+def test_address_fallback_keeps_trailing_号_before_a_label():
+    # Regression guard: an earlier attempt at the fix above matched a
+    # generic "any 2-4 Han characters then ：" as a stop label, which
+    # falsely triggered on the address's own trailing 號 fusing with the
+    # next label's first couple characters (e.g. "100號底價：" parsed as
+    # the label "號底價："), truncating the address before its own house
+    # number. The real fix uses an explicit label list instead.
+    text = "地址/完整地號：臺北市大安區信義路三段186號5樓用途：住宅底價：100"
+    assert _extract_address_fallback(text) == "臺北市大安區信義路三段186號5樓"
+
+
 def test_parse_ignores_decoy_tables_around_data_table():
     # Extra shell tables (pagination widgets etc.) shouldn't shift which
     # table gets parsed as data, since lookup is now header-driven, not

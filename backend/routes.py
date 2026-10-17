@@ -111,9 +111,17 @@ def _run_refresh(district: str) -> None:
     except Exception:
         logger.exception("Failed to update avg prices for %s", district)
 
-    # 4. Update cache meta — reached as long as the scrape itself succeeded,
-    # even if some rows above errored out.
-    upsert_cache_meta(district)
+    # 4. Update cache meta — but not if every single row errored out, or a
+    # fully-broken refresh (e.g. DB locked, geocoding API down) would mark
+    # the district as freshly updated and block retries until the TTL
+    # expires, even though nothing was actually persisted.
+    if not rows or errored < len(rows):
+        upsert_cache_meta(district)
+    else:
+        logger.error(
+            "All %d scraped rows failed to process for %s; not updating cache_meta",
+            len(rows), district,
+        )
     logger.info(
         "Refresh done for %s: scraped=%d new_geocode=%d cached=%d failed=%d errored=%d",
         district, len(rows), geocoded_new, geocoded_cached, failed, errored,
