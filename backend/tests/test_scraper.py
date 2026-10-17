@@ -1,5 +1,7 @@
 import pytest
-from scraper import parse_auction_rows, _parse_auction_count, _parse_auction_date, scrape_district
+from scraper import (
+    parse_auction_rows, _parse_auction_count, _parse_auction_date, scrape_district,
+)
 
 SAMPLE_HTML = """
 <table><tr><td>12下一頁</td></tr></table>
@@ -82,6 +84,10 @@ def test_parse_auction_count_variants():
     assert _parse_auction_count("2021/11/02 15:00:00第六拍") == 6
     assert _parse_auction_count("2021/11/02 15:00:00第七拍") == 7
     assert _parse_auction_count("2021/11/02 15:00:00第十拍") == 10
+    assert _parse_auction_count("2021/11/02 15:00:00第十一拍") == 11
+    assert _parse_auction_count("2021/11/02 15:00:00第十二拍") == 12
+    assert _parse_auction_count("2021/11/02 15:00:00第二十拍") == 20
+    assert _parse_auction_count("2021/11/02 15:00:00第12拍") == 12
 
 
 def test_parse_auction_date():
@@ -103,3 +109,43 @@ def test_parse_keeps_existing_city_prefix():
 
 def test_scrape_district_unknown_district_returns_empty():
     assert scrape_district("不存在區") == []
+
+
+NO_MAPS_LINK_HTML = """
+<table>
+  <tr>
+    <th>No</th><th>案號</th><th>拍賣日時</th><th>拍賣註記</th>
+    <th>是否點交</th><th>拍定日期</th><th>說明</th><th>環景圖</th><th>污染</th>
+  </tr>
+  <tr>
+    <td>1</td>
+    <td>1060100008317(台北分署／申股)</td>
+    <td>2021/11/02 15:00:00第三拍</td>
+    <td></td>
+    <td>Y</td>
+    <td>110/11/0244,129,999</td>
+    <td>
+      一、公告拍賣房屋
+      地址/完整地號：臺北市大安區信義路三段186號5樓
+      底價：37,700,000面積：119.72平方公尺面積：39.51坪
+    </td>
+    <td></td>
+    <td>查詢</td>
+  </tr>
+</table>
+"""
+
+
+def test_parse_falls_back_to_text_address_without_maps_link():
+    rows = parse_auction_rows(NO_MAPS_LINK_HTML, district="大安區")
+    assert len(rows) == 1
+    assert rows[0]["address"] == "臺北市大安區信義路三段186號5樓"
+
+
+def test_parse_ignores_decoy_tables_around_data_table():
+    # Extra shell tables (pagination widgets etc.) shouldn't shift which
+    # table gets parsed as data, since lookup is now header-driven, not
+    # index-based.
+    wrapped_html = "<table><tr><td>decoy</td></tr></table>" * 3 + SAMPLE_HTML
+    rows = parse_auction_rows(wrapped_html, district="大安區")
+    assert len(rows) == 2

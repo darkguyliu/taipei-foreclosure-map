@@ -78,3 +78,14 @@ def test_get_property_by_id():
 def test_get_property_not_found():
     resp = client.get("/api/properties/99999")
     assert resp.status_code == 404
+
+
+def test_run_refresh_does_not_raise_when_scrape_fails(monkeypatch):
+    import routes
+
+    def _boom(district):
+        raise RuntimeError("CAPTCHA fetch failed")
+
+    monkeypatch.setattr(routes, "scrape_district", _boom)
+    # Should log and return quietly instead of crashing the background task.
+    routes._run_refresh("大安區")

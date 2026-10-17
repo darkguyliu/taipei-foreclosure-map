@@ -21,16 +21,25 @@ HEADERS = {
 }
 
 
+_CJK_DIGITS = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
+
+
+def _cjk_to_int(token: str) -> int:
+    """Convert a CJK numeral (1-99) like '三'→3, '十'→10, '十一'→11, '二十'→20 to int."""
+    if "十" in token:
+        tens, _, ones = token.partition("十")
+        tens_val = _CJK_DIGITS.get(tens, 1)  # bare "十" means 10, not "0 十"
+        ones_val = _CJK_DIGITS.get(ones, 0)
+        return tens_val * 10 + ones_val
+    return _CJK_DIGITS.get(token, 1)
+
+
 def _parse_auction_count(text: str) -> int:
-    """Extract auction count from text like '2021/11/02 15:00:00第三拍'."""
-    cn_num = {
-        "一": 1, "二": 2, "三": 3, "四": 4, "五": 5,
-        "六": 6, "七": 7, "八": 8, "九": 9, "十": 10,
-    }
-    m = re.search(r"第([一二三四五六七八九十\d])拍", text)
+    """Extract auction count from text like '2021/11/02 15:00:00第三拍' or '...第十一拍'."""
+    m = re.search(r"第([一二三四五六七八九十\d]+)拍", text)
     if m:
-        ch = m.group(1)
-        return cn_num.get(ch, int(ch) if ch.isdigit() else 1)
+        token = m.group(1)
+        return int(token) if token.isdigit() else _cjk_to_int(token)
     if "特別變賣" in text or "四拍" in text:
         return 4
     return 1
@@ -51,6 +60,13 @@ def _extract_address(td) -> str:
         if "google" in href and "maps" in href:
             return a.get_text(strip=True)
     return ""
+
+
+def _extract_address_fallback(description_text: str) -> str:
+    """Fallback address parse straight from the 地址/完整地號 label, used when
+    the description has no Google Maps link to pull the address from."""
+    m = re.search(r"地址/完整地號[：:]\s*([^，,。]+?)(?=底價|面積|$)", description_text)
+    return m.group(1).strip() if m else ""
 
 
 def _extract_price(description_text: str) -> int:
@@ -92,15 +108,24 @@ def _has_city_prefix(address: str) -> bool:
     return any(address.startswith(prefix) for prefix in KNOWN_CITY_PREFIXES)
 
 
+def _find_data_table(tables):
+    """Locate the actual results table by its header, rather than assuming a
+    fixed table index (surrounding pagination/shell tables can shift)."""
+    for table in tables:
+        header_row = table.find("tr")
+        if header_row and header_row.find_all("th") and "案號" in header_row.get_text():
+            return table
+    return None
+
+
 def parse_auction_rows(html: str, district: str, city: str = None) -> list:
     """Parse table rows from query result HTML."""
     city = city or get_city_for_district(district) or "台北市"
     soup = BeautifulSoup(html, "html.parser")
-    tables = soup.find_all("table")
-    if len(tables) < 2:
+    data_table = _find_data_table(soup.find_all("table"))
+    if data_table is None:
         return []
 
-    data_table = tables[1]
     rows = []
     for tr in data_table.find_all("tr"):
         tds = tr.find_all("td")
@@ -122,7 +147,7 @@ def parse_auction_rows(html: str, district: str, city: str = None) -> list:
         # td[6]: description with address, price, area, PDF link
         desc_td = tds[6]
         desc_text = desc_td.get_text(strip=True)
-        address = _extract_address(desc_td)
+        address = _extract_address(desc_td) or _extract_address_fallback(desc_text)
         if not address:
             continue
 

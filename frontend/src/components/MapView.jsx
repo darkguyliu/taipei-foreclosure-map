@@ -50,9 +50,9 @@ export function MapView({ district, properties, selectedProperty, onSelectProper
     }
   }, [district, map])
 
-  // Pan to selected property
+  // Pan to selected property (skip if geocoding never resolved coordinates)
   useEffect(() => {
-    if (selectedProperty && map) {
+    if (selectedProperty && map && selectedProperty.lat != null && selectedProperty.lng != null) {
       map.panTo({ lat: selectedProperty.lat, lng: selectedProperty.lng })
     }
   }, [selectedProperty, map])
@@ -66,20 +66,22 @@ export function MapView({ district, properties, selectedProperty, onSelectProper
         gestureHandling="greedy"
         disableDefaultUI={false}
       >
-        {properties.map(p => (
-          <AdvancedMarker
-            key={p.id}
-            position={{ lat: p.lat, lng: p.lng }}
-            onClick={() => onSelectProperty(p)}
-          >
-            <MarkerPin
-              color={AUCTION_COLORS[p.auction_count] || AUCTION_COLORS[3]}
-              label={p.auction_count}
-            />
-          </AdvancedMarker>
-        ))}
+        {properties
+          .filter(p => p.lat != null && p.lng != null)
+          .map(p => (
+            <AdvancedMarker
+              key={p.id}
+              position={{ lat: p.lat, lng: p.lng }}
+              onClick={() => onSelectProperty(p)}
+            >
+              <MarkerPin
+                color={AUCTION_COLORS[p.auction_count] || AUCTION_COLORS[3]}
+                label={p.auction_count}
+              />
+            </AdvancedMarker>
+          ))}
 
-        {selectedProperty && (
+        {selectedProperty && selectedProperty.lat != null && selectedProperty.lng != null && (
           <InfoWindow
             position={{ lat: selectedProperty.lat, lng: selectedProperty.lng }}
             onCloseClick={() => onSelectProperty(null)}
