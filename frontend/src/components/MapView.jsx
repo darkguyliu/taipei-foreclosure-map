@@ -1,9 +1,13 @@
 import { Map, AdvancedMarker, InfoWindow, useMap } from '@vis.gl/react-google-maps'
-import { useEffect } from 'react'
+import { useEffect, useMemo } from 'react'
 import { AUCTION_COLORS, DISTRICT_CENTERS } from '../constants'
 
 const TAIPEI_CENTER = { lat: 25.0478, lng: 121.5319 }
 const DISTRICT_ZOOM = 15
+
+function hasCoords(p) {
+  return p != null && p.lat != null && p.lng != null
+}
 
 function MarkerPin({ color, label }) {
   return (
@@ -36,6 +40,7 @@ function MarkerPin({ color, label }) {
 
 export function MapView({ district, properties, selectedProperty, onSelectProperty, isFavorite, toggleFavorite, getAvgPrice }) {
   const map = useMap()
+  const mappableProperties = useMemo(() => properties.filter(hasCoords), [properties])
 
   // Center map on district change
   useEffect(() => {
@@ -50,9 +55,9 @@ export function MapView({ district, properties, selectedProperty, onSelectProper
     }
   }, [district, map])
 
-  // Pan to selected property
+  // Pan to selected property (skip if geocoding never resolved coordinates)
   useEffect(() => {
-    if (selectedProperty && map) {
+    if (map && hasCoords(selectedProperty)) {
       map.panTo({ lat: selectedProperty.lat, lng: selectedProperty.lng })
     }
   }, [selectedProperty, map])
@@ -66,7 +71,7 @@ export function MapView({ district, properties, selectedProperty, onSelectProper
         gestureHandling="greedy"
         disableDefaultUI={false}
       >
-        {properties.map(p => (
+        {mappableProperties.map(p => (
           <AdvancedMarker
             key={p.id}
             position={{ lat: p.lat, lng: p.lng }}
@@ -79,7 +84,7 @@ export function MapView({ district, properties, selectedProperty, onSelectProper
           </AdvancedMarker>
         ))}
 
-        {selectedProperty && (
+        {hasCoords(selectedProperty) && (
           <InfoWindow
             position={{ lat: selectedProperty.lat, lng: selectedProperty.lng }}
             onCloseClick={() => onSelectProperty(null)}
@@ -93,6 +98,10 @@ export function MapView({ district, properties, selectedProperty, onSelectProper
           </InfoWindow>
         )}
       </Map>
+
+      {selectedProperty && !hasCoords(selectedProperty) && (
+        <div className="map-no-coords-banner">⚠️ 此物件尚無法定位，暫不顯示於地圖上</div>
+      )}
     </div>
   )
 }

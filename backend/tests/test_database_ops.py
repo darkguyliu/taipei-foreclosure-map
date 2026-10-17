@@ -7,7 +7,10 @@ import database
 _TEST_DB = "file:testdb_ops?mode=memory&cache=shared&uri=true"
 database.DB_PATH = _TEST_DB
 
-from database import init_db, get_connection, upsert_property, upsert_avg_price, upsert_cache_meta, get_properties, get_avg_prices
+from database import (
+    init_db, get_connection, upsert_property, upsert_avg_price, upsert_cache_meta,
+    get_properties, get_avg_prices, get_geocode_cache,
+)
 
 # Keep a persistent connection open so the shared in-memory database
 # is not destroyed between init_db() and the test queries.
@@ -76,6 +79,28 @@ def test_upsert_avg_price():
     prices = get_avg_prices("大安區")
     property_price = next(p for p in prices if p["property_type"] == "住宅")
     assert property_price["avg_price"] == 90.0
+
+
+def test_get_geocode_cache_maps_address_norm_to_coords():
+    upsert_property({
+        "case_number": "GEO-001", "court": "台北地院", "district": "大安區",
+        "address": "台北市大安區仁愛路一段1號",
+        "address_norm": "台北市大安區仁愛路一段1號",
+        "lat": 25.03, "lng": 121.54,
+        "floor_price": 1_000_000, "area": 10.0, "property_type": "住宅",
+        "auction_count": 1, "auction_date": "2026-04-01", "auction_url": "",
+    })
+    upsert_property({
+        "case_number": "GEO-002", "court": "台北地院", "district": "大安區",
+        "address": "台北市大安區仁愛路二段2號",
+        "address_norm": "台北市大安區仁愛路二段2號",
+        "lat": None, "lng": None,  # never geocoded — should be excluded
+        "floor_price": 2_000_000, "area": 20.0, "property_type": "住宅",
+        "auction_count": 1, "auction_date": "2026-04-01", "auction_url": "",
+    })
+    cache = get_geocode_cache()
+    assert cache["台北市大安區仁愛路一段1號"] == (25.03, 121.54)
+    assert "台北市大安區仁愛路二段2號" not in cache
 
 
 def test_get_properties_filter_by_price():

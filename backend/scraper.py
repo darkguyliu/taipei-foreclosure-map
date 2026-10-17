@@ -21,16 +21,33 @@ HEADERS = {
 }
 
 
+_CJK_DIGITS = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
+_CJK_TOKEN_RE = re.compile(r"^(?:[一二三四五六七八九]?十[一二三四五六七八九]?|[一二三四五六七八九])$")
+
+
+def _cjk_to_int(token: str) -> int:
+    """Convert a CJK numeral (1-99) like '三'→3, '十'→10, '十一'→11, '二十'→20 to int.
+
+    Anything not matching that shape (mixed/garbled input like '一二' or
+    '十十') is logged and defaults to 1, rather than silently guessing.
+    """
+    if not _CJK_TOKEN_RE.match(token):
+        logger.warning("Unrecognized auction-count token %r, defaulting to 1", token)
+        return 1
+    if "十" in token:
+        tens, _, ones = token.partition("十")
+        tens_val = _CJK_DIGITS.get(tens, 1)  # bare "十" means 10, not "0 十"
+        ones_val = _CJK_DIGITS.get(ones, 0)
+        return tens_val * 10 + ones_val
+    return _CJK_DIGITS[token]
+
+
 def _parse_auction_count(text: str) -> int:
-    """Extract auction count from text like '2021/11/02 15:00:00第三拍'."""
-    cn_num = {
-        "一": 1, "二": 2, "三": 3, "四": 4, "五": 5,
-        "六": 6, "七": 7, "八": 8, "九": 9, "十": 10,
-    }
-    m = re.search(r"第([一二三四五六七八九十\d])拍", text)
+    """Extract auction count from text like '2021/11/02 15:00:00第三拍' or '...第十一拍'."""
+    m = re.search(r"第([一二三四五六七八九十\d]+)拍", text)
     if m:
-        ch = m.group(1)
-        return cn_num.get(ch, int(ch) if ch.isdigit() else 1)
+        token = m.group(1)
+        return int(token) if token.isdigit() else _cjk_to_int(token)
     if "特別變賣" in text or "四拍" in text:
         return 4
     return 1
@@ -51,6 +68,39 @@ def _extract_address(td) -> str:
         if "google" in href and "maps" in href:
             return a.get_text(strip=True)
     return ""
+
+
+def _extract_address_fallback(description_text: str) -> str:
+    """Fallback address parse straight from the 地址/完整地號 label, used when
+    the description has no Google Maps link to pull the address from.
+
+    Bounded to 60 chars and requires a street-address shape (a 路/街/巷/弄/
+    大道 marker followed by a 號) while rejecting any candidate that still
+    contains 地號 (land lot number, e.g. "OO段123地號及其上建物") — those
+    would geocode to the wrong place rather than a real street address.
+
+    get_text(strip=True) runs all description fields together with no
+    separator, so the match must also stop at the next known field label
+    (not just 底價/面積) or trailing field text gets appended as noise.
+    `stop_labels` must be an explicit list, not a generic "N Han chars
+    then ：" pattern — the address's own trailing 號 can fuse with the
+    next label's first characters into something that looks like one.
+    """
+    stop_labels = "底價|面積|權利範圍|用途|使用分區|建物|持分|使用現況|點交|稅捐"
+    m = re.search(
+        rf"地址/完整地號[：:]\s*([^，,。]{{1,60}}?)(?=[，,。]|(?:{stop_labels})[：:]|$)",
+        description_text,
+    )
+    if not m:
+        logger.debug(
+            "Address fallback didn't match (no known field label after it?): %.80s",
+            description_text,
+        )
+        return ""
+    candidate = m.group(1).strip()
+    if not candidate or "地號" in candidate or not re.search(r"(?:[路街巷弄]|大道).*號", candidate):
+        return ""
+    return candidate
 
 
 def _extract_price(description_text: str) -> int:
@@ -92,15 +142,44 @@ def _has_city_prefix(address: str) -> bool:
     return any(address.startswith(prefix) for prefix in KNOWN_CITY_PREFIXES)
 
 
+def _find_data_table(tables):
+    """Locate the actual results table by its header, rather than assuming a
+    fixed table index (surrounding pagination/shell tables can shift).
+
+    The live site renders the header as "案 號" (with whitespace/line breaks
+    between characters), so the header text is whitespace-normalized before
+    matching — comparing the raw text against "案號" would never match and
+    silently return no rows for every query.
+    """
+    for table in tables:
+        header_row = table.find("tr")
+        if not header_row or not header_row.find_all("th", recursive=False):
+            continue
+        header_text = re.sub(r"\s+", "", header_row.get_text())
+        if "案號" in header_text:
+            return table
+    return None
+
+
+class DataTableNotFoundError(RuntimeError):
+    """The results table couldn't be located in the page at all — distinct
+    from a found table with zero matching rows, which is a legitimate
+    "no listings right now" result. Raised instead of returning [] so a
+    site layout change surfaces as a scrape failure (skips cache_meta,
+    allows retry) rather than looking identical to a real empty district.
+    """
+
+
 def parse_auction_rows(html: str, district: str, city: str = None) -> list:
     """Parse table rows from query result HTML."""
     city = city or get_city_for_district(district) or "台北市"
     soup = BeautifulSoup(html, "html.parser")
-    tables = soup.find_all("table")
-    if len(tables) < 2:
-        return []
+    data_table = _find_data_table(soup.find_all("table"))
+    if data_table is None:
+        raise DataTableNotFoundError(
+            f"No data table found for {district} (page layout may have changed)"
+        )
 
-    data_table = tables[1]
     rows = []
     for tr in data_table.find_all("tr"):
         tds = tr.find_all("td")
@@ -122,7 +201,7 @@ def parse_auction_rows(html: str, district: str, city: str = None) -> list:
         # td[6]: description with address, price, area, PDF link
         desc_td = tds[6]
         desc_text = desc_td.get_text(strip=True)
-        address = _extract_address(desc_td)
+        address = _extract_address(desc_td) or _extract_address_fallback(desc_text)
         if not address:
             continue
 
@@ -192,7 +271,18 @@ def scrape_district(district: str) -> list:
         resp = session.get(f"{BASE_URL}/Estate/Query", params=params, timeout=20)
         resp.raise_for_status()
 
-        rows = parse_auction_rows(resp.text, district, city)
+        try:
+            rows = parse_auction_rows(resp.text, district, city)
+        except DataTableNotFoundError:
+            if page == 1:
+                raise  # no data at all — a real scrape failure, not "0 results"
+            # Already-collected pages are kept; only pagination stops here.
+            logger.warning(
+                "No data table on page %d for %s; stopping with %d rows collected",
+                page, district, len(all_rows),
+            )
+            break
+
         all_rows.extend(rows)
 
         if not rows:

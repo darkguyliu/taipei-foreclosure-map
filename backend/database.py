@@ -126,6 +126,16 @@ def upsert_cache_meta(district: str) -> None:
         """, (district,))
 
 
+def get_geocode_cache() -> Dict[str, tuple]:
+    """Map every already-geocoded address_norm to its (lat, lng), for a
+    single bulk lookup instead of one query per row during a refresh."""
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT address_norm, lat, lng FROM properties WHERE lat IS NOT NULL"
+        ).fetchall()
+    return {row["address_norm"]: (row["lat"], row["lng"]) for row in rows}
+
+
 def get_properties(
     district: str,
     min_price: Optional[int] = None,
