@@ -5,6 +5,10 @@ import { AUCTION_COLORS, DISTRICT_CENTERS } from '../constants'
 const TAIPEI_CENTER = { lat: 25.0478, lng: 121.5319 }
 const DISTRICT_ZOOM = 15
 
+function hasCoords(p) {
+  return p != null && p.lat != null && p.lng != null
+}
+
 function MarkerPin({ color, label }) {
   return (
     <div style={{
@@ -52,7 +56,7 @@ export function MapView({ district, properties, selectedProperty, onSelectProper
 
   // Pan to selected property (skip if geocoding never resolved coordinates)
   useEffect(() => {
-    if (selectedProperty && map && selectedProperty.lat != null && selectedProperty.lng != null) {
+    if (map && hasCoords(selectedProperty)) {
       map.panTo({ lat: selectedProperty.lat, lng: selectedProperty.lng })
     }
   }, [selectedProperty, map])
@@ -67,7 +71,7 @@ export function MapView({ district, properties, selectedProperty, onSelectProper
         disableDefaultUI={false}
       >
         {properties
-          .filter(p => p.lat != null && p.lng != null)
+          .filter(hasCoords)
           .map(p => (
             <AdvancedMarker
               key={p.id}
@@ -81,7 +85,7 @@ export function MapView({ district, properties, selectedProperty, onSelectProper
             </AdvancedMarker>
           ))}
 
-        {selectedProperty && selectedProperty.lat != null && selectedProperty.lng != null && (
+        {hasCoords(selectedProperty) && (
           <InfoWindow
             position={{ lat: selectedProperty.lat, lng: selectedProperty.lng }}
             onCloseClick={() => onSelectProperty(null)}

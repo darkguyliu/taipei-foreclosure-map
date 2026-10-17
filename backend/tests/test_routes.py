@@ -80,7 +80,8 @@ def test_get_property_not_found():
     assert resp.status_code == 404
 
 
-def test_run_refresh_does_not_raise_when_scrape_fails(monkeypatch):
+def test_run_refresh_does_not_raise_when_scrape_fails(monkeypatch, caplog):
+    import logging
     import routes
 
     def _boom(district):
@@ -88,4 +89,6 @@ def test_run_refresh_does_not_raise_when_scrape_fails(monkeypatch):
 
     monkeypatch.setattr(routes, "scrape_district", _boom)
     # Should log and return quietly instead of crashing the background task.
-    routes._run_refresh("大安區")
+    with caplog.at_level(logging.ERROR, logger="routes"):
+        routes._run_refresh("大安區")
+    assert any("Refresh failed" in record.message for record in caplog.records)

@@ -64,9 +64,19 @@ def _extract_address(td) -> str:
 
 def _extract_address_fallback(description_text: str) -> str:
     """Fallback address parse straight from the 地址/完整地號 label, used when
-    the description has no Google Maps link to pull the address from."""
-    m = re.search(r"地址/完整地號[：:]\s*([^，,。]+?)(?=底價|面積|$)", description_text)
-    return m.group(1).strip() if m else ""
+    the description has no Google Maps link to pull the address from.
+
+    Bounded to 60 chars and requires a street-address marker (路/街/段/
+    巷/弄/號) so a bare 地號 (land lot number, e.g. "OO段123地號") — which
+    would geocode to the wrong place — is rejected rather than returned.
+    """
+    m = re.search(r"地址/完整地號[：:]\s*([^，,。]{1,60}?)(?=底價|面積|$)", description_text)
+    if not m:
+        return ""
+    candidate = m.group(1).strip()
+    if not candidate or candidate.endswith("地號") or not re.search(r"[路街段巷弄號]", candidate):
+        return ""
+    return candidate
 
 
 def _extract_price(description_text: str) -> int:
@@ -110,10 +120,19 @@ def _has_city_prefix(address: str) -> bool:
 
 def _find_data_table(tables):
     """Locate the actual results table by its header, rather than assuming a
-    fixed table index (surrounding pagination/shell tables can shift)."""
+    fixed table index (surrounding pagination/shell tables can shift).
+
+    The live site renders the header as "案 號" (with whitespace/line breaks
+    between characters), so the header text is whitespace-normalized before
+    matching — comparing the raw text against "案號" would never match and
+    silently return no rows for every query.
+    """
     for table in tables:
         header_row = table.find("tr")
-        if header_row and header_row.find_all("th") and "案號" in header_row.get_text():
+        if not header_row or not header_row.find_all("th", recursive=False):
+            continue
+        header_text = re.sub(r"\s+", "", header_row.get_text())
+        if "案號" in header_text:
             return table
     return None
 

@@ -142,10 +142,35 @@ def test_parse_falls_back_to_text_address_without_maps_link():
     assert rows[0]["address"] == "臺北市大安區信義路三段186號5樓"
 
 
+LAND_LOT_ONLY_HTML = NO_MAPS_LINK_HTML.replace(
+    "地址/完整地號：臺北市大安區信義路三段186號5樓",
+    "地址/完整地號：大安段一小段123地號",
+)
+
+
+def test_parse_rejects_land_lot_fallback_without_street_address():
+    # A bare 地號 (land lot number) would geocode to the wrong coordinates,
+    # so the fallback should reject it rather than return it as an address.
+    rows = parse_auction_rows(LAND_LOT_ONLY_HTML, district="大安區")
+    assert rows == []
+
+
 def test_parse_ignores_decoy_tables_around_data_table():
     # Extra shell tables (pagination widgets etc.) shouldn't shift which
     # table gets parsed as data, since lookup is now header-driven, not
     # index-based.
     wrapped_html = "<table><tr><td>decoy</td></tr></table>" * 3 + SAMPLE_HTML
     rows = parse_auction_rows(wrapped_html, district="大安區")
+    assert len(rows) == 2
+
+
+def test_parse_matches_header_with_whitespace_between_characters():
+    # The live site actually renders the header as "案 號" (space/<br>
+    # between characters), not the contiguous "案號" used in the fixtures
+    # above — the header match must be whitespace-insensitive or every
+    # live query would silently return zero rows.
+    html_with_spaced_header = SAMPLE_HTML.replace(
+        "<th>案號</th>", "<th>案 號<br>\r\n</th>"
+    )
+    rows = parse_auction_rows(html_with_spaced_header, district="大安區")
     assert len(rows) == 2
