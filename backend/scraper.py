@@ -66,15 +66,16 @@ def _extract_address_fallback(description_text: str) -> str:
     """Fallback address parse straight from the 地址/完整地號 label, used when
     the description has no Google Maps link to pull the address from.
 
-    Bounded to 60 chars and requires a street-address marker (路/街/段/
-    巷/弄/號) so a bare 地號 (land lot number, e.g. "OO段123地號") — which
-    would geocode to the wrong place — is rejected rather than returned.
+    Bounded to 60 chars and requires a street-address shape (a 路/街/巷/弄
+    marker followed by a 號) while rejecting any candidate that still
+    contains 地號 (land lot number, e.g. "OO段123地號及其上建物") — those
+    would geocode to the wrong place rather than a real street address.
     """
-    m = re.search(r"地址/完整地號[：:]\s*([^，,。]{1,60}?)(?=底價|面積|$)", description_text)
+    m = re.search(r"地址/完整地號[：:]\s*([^，,。]{1,60}?)(?=[，,。]|底價|面積|$)", description_text)
     if not m:
         return ""
     candidate = m.group(1).strip()
-    if not candidate or candidate.endswith("地號") or not re.search(r"[路街段巷弄號]", candidate):
+    if not candidate or "地號" in candidate or not re.search(r"[路街巷弄].*號", candidate):
         return ""
     return candidate
 

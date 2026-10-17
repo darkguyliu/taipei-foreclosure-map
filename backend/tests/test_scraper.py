@@ -1,6 +1,7 @@
 import pytest
 from scraper import (
     parse_auction_rows, _parse_auction_count, _parse_auction_date, scrape_district,
+    _extract_address_fallback,
 )
 
 SAMPLE_HTML = """
@@ -153,6 +154,21 @@ def test_parse_rejects_land_lot_fallback_without_street_address():
     # so the fallback should reject it rather than return it as an address.
     rows = parse_auction_rows(LAND_LOT_ONLY_HTML, district="大安區")
     assert rows == []
+
+
+def test_address_fallback_stops_at_trailing_comma():
+    # If a comma separates the address from the next field instead of the
+    # field label appearing immediately, the match must still terminate at
+    # the comma rather than failing outright and losing the row.
+    text = "地址/完整地號：臺北市大安區信義路三段186號5樓，底價：100"
+    assert _extract_address_fallback(text) == "臺北市大安區信義路三段186號5樓"
+
+
+def test_address_fallback_rejects_land_lot_with_trailing_text():
+    # "地號" in the middle of the candidate (not just at the very end) must
+    # still be rejected — e.g. boilerplate like "...地號及其上建物".
+    text = "地址/完整地號：大安段一小段123地號及其上建物底價：100"
+    assert _extract_address_fallback(text) == ""
 
 
 def test_parse_ignores_decoy_tables_around_data_table():
