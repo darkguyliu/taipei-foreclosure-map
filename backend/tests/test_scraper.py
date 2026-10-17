@@ -1,9 +1,35 @@
 import logging
 import pytest
+import scraper as scraper_module
 from scraper import (
     parse_auction_rows, _parse_auction_count, _parse_auction_date, scrape_district,
     _extract_address_fallback, _cjk_to_int, DataTableNotFoundError,
 )
+
+
+class _FakeResp:
+    def __init__(self, json_data=None, text=""):
+        self._json = json_data
+        self.text = text
+
+    def json(self):
+        return self._json
+
+    def raise_for_status(self):
+        pass
+
+
+class _FakeSession:
+    """Stands in for requests.Session so scrape_district's pagination logic
+    can be tested without hitting the real site."""
+
+    def __init__(self):
+        self.headers = {}
+
+    def get(self, url, **kwargs):
+        if "Captcha" in url:
+            return _FakeResp(json_data={"code": "abc"})
+        return _FakeResp(text="<html></html>")
 
 SAMPLE_HTML = """
 <table><tr><td>12下一頁</td></tr></table>
@@ -129,6 +155,39 @@ def test_scrape_district_unknown_district_returns_empty():
     assert scrape_district("不存在區") == []
 
 
+def test_scrape_district_keeps_earlier_pages_if_a_later_page_has_no_table(monkeypatch):
+    # If the live site's table disappears on page 2+ (e.g. a transient glitch
+    # or an edge case this project hasn't seen), pagination should stop and
+    # return what page 1 already collected — not discard it.
+    monkeypatch.setattr(scraper_module.requests, "Session", _FakeSession)
+
+    page1_rows = [{"case_number": "P1-1"}]
+    calls = {"n": 0}
+
+    def _fake_parse(html, district, city=None):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return page1_rows
+        raise DataTableNotFoundError("boom")
+
+    monkeypatch.setattr(scraper_module, "parse_auction_rows", _fake_parse)
+
+    assert scraper_module.scrape_district("大安區") == page1_rows
+
+
+def test_scrape_district_raises_if_first_page_has_no_table(monkeypatch):
+    # No prior pages to preserve here — this is a real scrape failure, not
+    # "the district legitimately has zero listings".
+    def _always_raise(html, district, city=None):
+        raise DataTableNotFoundError("boom")
+
+    monkeypatch.setattr(scraper_module.requests, "Session", _FakeSession)
+    monkeypatch.setattr(scraper_module, "parse_auction_rows", _always_raise)
+
+    with pytest.raises(DataTableNotFoundError):
+        scraper_module.scrape_district("大安區")
+
+
 NO_MAPS_LINK_HTML = """
 <table>
   <tr>
@@ -204,12 +263,8 @@ def test_address_fallback_stops_at_other_field_labels():
 
 
 def test_address_fallback_keeps_trailing_号_before_a_label():
-    # Regression guard: an earlier attempt at the fix above matched a
-    # generic "any 2-4 Han characters then ：" as a stop label, which
-    # falsely triggered on the address's own trailing 號 fusing with the
-    # next label's first couple characters (e.g. "100號底價：" parsed as
-    # the label "號底價："), truncating the address before its own house
-    # number. The real fix uses an explicit label list instead.
+    # A trailing 號 followed immediately by a label (no separator) must
+    # not be swallowed into that label — the address needs its own 號.
     text = "地址/完整地號：臺北市大安區信義路三段186號5樓用途：住宅底價：100"
     assert _extract_address_fallback(text) == "臺北市大安區信義路三段186號5樓"
 

@@ -10,6 +10,7 @@ from database import (
 from scraper import scrape_district
 from geocoder import normalize_address, geocode_address
 from realtime_prices import fetch_avg_prices
+from cities import get_city_for_district
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api")
@@ -51,6 +52,12 @@ def avg_prices(district: str):
 
 @router.post("/refresh")
 def refresh(district: str, background_tasks: BackgroundTasks):
+    # district is caller-supplied and otherwise unvalidated; without this
+    # check, any string writes a cache_meta row for itself via _run_refresh
+    # below (scrape_district("不存在區") returns [], which still passes
+    # through to upsert_cache_meta).
+    if not get_city_for_district(district):
+        raise HTTPException(status_code=400, detail=f"Unknown district: {district}")
     background_tasks.add_task(_run_refresh, district)
     return {"status": "started", "district": district}
 

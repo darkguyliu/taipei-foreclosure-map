@@ -13,8 +13,7 @@ database.DB_PATH = _TEST_DB
 _keeper = sqlite3.connect(_TEST_DB, uri=True, check_same_thread=False)
 
 # Imported after DB_PATH is overridden above, matching this file's other
-# database-touching imports — routes.py doesn't currently open a connection
-# at import time, but keeping the ordering consistent avoids relying on that.
+# database-touching imports.
 import routes
 from database import init_db
 from main import app
@@ -83,6 +82,15 @@ def test_get_property_by_id():
 def test_get_property_not_found():
     resp = client.get("/api/properties/99999")
     assert resp.status_code == 404
+
+
+def test_refresh_rejects_unknown_district():
+    # district is caller-supplied; without this check an arbitrary string
+    # would still get a cache_meta row written for it (scrape_district
+    # returns [] for it, which otherwise passes the "something refreshed"
+    # check in _run_refresh).
+    resp = client.post("/api/refresh?district=不存在區")
+    assert resp.status_code == 400
 
 
 def test_run_refresh_does_not_raise_when_scrape_fails(monkeypatch, caplog):

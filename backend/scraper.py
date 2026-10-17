@@ -79,15 +79,12 @@ def _extract_address_fallback(description_text: str) -> str:
     contains 地號 (land lot number, e.g. "OO段123地號及其上建物") — those
     would geocode to the wrong place rather than a real street address.
 
-    get_text(strip=True) runs all the description's fields together with
-    no separator, so the match also has to stop at the start of the next
-    known field label (not just 底價/面積, which is all the known samples
-    had) — otherwise trailing field text gets appended to the address and
-    sent to geocoding as noise. A blanket "any N Han characters then ："
-    terminator was tried and rejected: it falsely matched inside the
-    address itself (a trailing "號" fusing with the next label's first
-    couple characters, e.g. "...100號底價：" reads as the 3-char label
-    "號底價："), truncating the address before its own house number.
+    get_text(strip=True) runs all description fields together with no
+    separator, so the match must also stop at the next known field label
+    (not just 底價/面積) or trailing field text gets appended as noise.
+    `stop_labels` must be an explicit list, not a generic "N Han chars
+    then ：" pattern — the address's own trailing 號 can fuse with the
+    next label's first characters into something that looks like one.
     """
     stop_labels = "底價|面積|權利範圍|用途|使用分區|建物|持分|使用現況|點交|稅捐"
     m = re.search(
@@ -270,7 +267,18 @@ def scrape_district(district: str) -> list:
         resp = session.get(f"{BASE_URL}/Estate/Query", params=params, timeout=20)
         resp.raise_for_status()
 
-        rows = parse_auction_rows(resp.text, district, city)
+        try:
+            rows = parse_auction_rows(resp.text, district, city)
+        except DataTableNotFoundError:
+            if page == 1:
+                raise  # no data at all — a real scrape failure, not "0 results"
+            # Already-collected pages are kept; only pagination stops here.
+            logger.warning(
+                "No data table on page %d for %s; stopping with %d rows collected",
+                page, district, len(all_rows),
+            )
+            break
+
         all_rows.extend(rows)
 
         if not rows:
