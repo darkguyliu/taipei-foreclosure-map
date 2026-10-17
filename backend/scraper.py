@@ -22,16 +22,24 @@ HEADERS = {
 
 
 _CJK_DIGITS = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
+_CJK_TOKEN_RE = re.compile(r"^(?:[一二三四五六七八九]?十[一二三四五六七八九]?|[一二三四五六七八九])$")
 
 
 def _cjk_to_int(token: str) -> int:
-    """Convert a CJK numeral (1-99) like '三'→3, '十'→10, '十一'→11, '二十'→20 to int."""
+    """Convert a CJK numeral (1-99) like '三'→3, '十'→10, '十一'→11, '二十'→20 to int.
+
+    Anything not matching that shape (mixed/garbled input like '一二' or
+    '十十') is logged and defaults to 1, rather than silently guessing.
+    """
+    if not _CJK_TOKEN_RE.match(token):
+        logger.warning("Unrecognized auction-count token %r, defaulting to 1", token)
+        return 1
     if "十" in token:
         tens, _, ones = token.partition("十")
         tens_val = _CJK_DIGITS.get(tens, 1)  # bare "十" means 10, not "0 十"
         ones_val = _CJK_DIGITS.get(ones, 0)
         return tens_val * 10 + ones_val
-    return _CJK_DIGITS.get(token, 1)
+    return _CJK_DIGITS[token]
 
 
 def _parse_auction_count(text: str) -> int:
@@ -144,6 +152,9 @@ def parse_auction_rows(html: str, district: str, city: str = None) -> list:
     soup = BeautifulSoup(html, "html.parser")
     data_table = _find_data_table(soup.find_all("table"))
     if data_table is None:
+        logger.warning(
+            "No data table found for %s (page layout may have changed)", district,
+        )
         return []
 
     rows = []

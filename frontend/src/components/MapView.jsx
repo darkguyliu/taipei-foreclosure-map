@@ -1,5 +1,5 @@
 import { Map, AdvancedMarker, InfoWindow, useMap } from '@vis.gl/react-google-maps'
-import { useEffect } from 'react'
+import { useEffect, useMemo } from 'react'
 import { AUCTION_COLORS, DISTRICT_CENTERS } from '../constants'
 
 const TAIPEI_CENTER = { lat: 25.0478, lng: 121.5319 }
@@ -40,6 +40,7 @@ function MarkerPin({ color, label }) {
 
 export function MapView({ district, properties, selectedProperty, onSelectProperty, isFavorite, toggleFavorite, getAvgPrice }) {
   const map = useMap()
+  const mappableProperties = useMemo(() => properties.filter(hasCoords), [properties])
 
   // Center map on district change
   useEffect(() => {
@@ -70,20 +71,18 @@ export function MapView({ district, properties, selectedProperty, onSelectProper
         gestureHandling="greedy"
         disableDefaultUI={false}
       >
-        {properties
-          .filter(hasCoords)
-          .map(p => (
-            <AdvancedMarker
-              key={p.id}
-              position={{ lat: p.lat, lng: p.lng }}
-              onClick={() => onSelectProperty(p)}
-            >
-              <MarkerPin
-                color={AUCTION_COLORS[p.auction_count] || AUCTION_COLORS[3]}
-                label={p.auction_count}
-              />
-            </AdvancedMarker>
-          ))}
+        {mappableProperties.map(p => (
+          <AdvancedMarker
+            key={p.id}
+            position={{ lat: p.lat, lng: p.lng }}
+            onClick={() => onSelectProperty(p)}
+          >
+            <MarkerPin
+              color={AUCTION_COLORS[p.auction_count] || AUCTION_COLORS[3]}
+              label={p.auction_count}
+            />
+          </AdvancedMarker>
+        ))}
 
         {hasCoords(selectedProperty) && (
           <InfoWindow
@@ -99,6 +98,10 @@ export function MapView({ district, properties, selectedProperty, onSelectProper
           </InfoWindow>
         )}
       </Map>
+
+      {selectedProperty && !hasCoords(selectedProperty) && (
+        <div className="map-no-coords-banner">⚠️ 此物件尚無法定位，暫不顯示於地圖上</div>
+      )}
     </div>
   )
 }

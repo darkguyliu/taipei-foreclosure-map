@@ -1,7 +1,8 @@
+import logging
 import pytest
 from scraper import (
     parse_auction_rows, _parse_auction_count, _parse_auction_date, scrape_district,
-    _extract_address_fallback,
+    _extract_address_fallback, _cjk_to_int,
 )
 
 SAMPLE_HTML = """
@@ -94,6 +95,20 @@ def test_parse_auction_count_variants():
 def test_parse_auction_date():
     assert _parse_auction_date("2021/11/02 15:00:00第三拍") == "2021-11-02"
     assert _parse_auction_date("2025/01/07 15:00:00特別變賣") == "2025-01-07"
+
+
+def test_cjk_to_int_logs_warning_on_unrecognized_token(caplog):
+    with caplog.at_level(logging.WARNING, logger="scraper"):
+        assert _cjk_to_int("一二") == 1  # mixed digits without 十 — not a real CJK numeral
+        assert _cjk_to_int("十十") == 1  # malformed double-十
+    assert sum("Unrecognized auction-count token" in r.message for r in caplog.records) == 2
+
+
+def test_parse_logs_warning_when_no_data_table_found(caplog):
+    with caplog.at_level(logging.WARNING, logger="scraper"):
+        rows = parse_auction_rows("<p>not a table at all</p>", district="大安區")
+    assert rows == []
+    assert any("No data table found" in r.message for r in caplog.records)
 
 
 def test_parse_infers_new_taipei_prefix_from_district():

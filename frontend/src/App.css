@@ -157,6 +157,20 @@
 /* MapView */
 .map-container { flex: 1; position: relative; }
 .map-container > div { height: 100% !important; }
+.map-no-coords-banner {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: #2a2a1a;
+  color: #f4c430;
+  border: 1px solid #f4c430;
+  border-radius: 6px;
+  padding: 6px 14px;
+  font-size: 13px;
+  z-index: 10;
+  pointer-events: none;
+}
 
 /* InfoWindow */
 .info-window { min-width: 220px; font-family: inherit; color: #1a1a1a; }

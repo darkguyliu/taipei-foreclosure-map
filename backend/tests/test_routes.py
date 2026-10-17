@@ -90,4 +90,54 @@ def test_run_refresh_does_not_raise_when_scrape_fails(monkeypatch, caplog):
     # Should log and return quietly instead of crashing the background task.
     with caplog.at_level(logging.ERROR, logger="routes"):
         routes._run_refresh("大安區")
-    assert any("Refresh failed" in record.message for record in caplog.records)
+    assert any("Scrape failed" in record.message for record in caplog.records)
+
+
+def test_run_refresh_skips_bad_row_but_still_persists_others(monkeypatch, caplog):
+    rows = [
+        {
+            "case_number": "BAD-001", "court": "台北地院", "district": "大安區",
+            "address": "台北市大安區仁愛路一段1號", "floor_price": 1_000_000,
+            "area": 10.0, "property_type": "住宅", "auction_count": 1,
+            "auction_date": "2026-05-01", "auction_url": "https://example.com/bad",
+        },
+        {
+            "case_number": "GOOD-001", "court": "台北地院", "district": "大安區",
+            "address": "台北市大安區仁愛路二段2號", "floor_price": 2_000_000,
+            "area": 20.0, "property_type": "住宅", "auction_count": 1,
+            "auction_date": "2026-05-02", "auction_url": "https://example.com/good",
+        },
+    ]
+    monkeypatch.setattr(routes, "scrape_district", lambda district: rows)
+    monkeypatch.setattr(routes, "fetch_avg_prices", lambda district: [])
+
+    original_upsert = routes.upsert_property
+
+    def _flaky_upsert(row):
+        if row["case_number"] == "BAD-001":
+            raise RuntimeError("DB write failed")
+        original_upsert(row)
+
+    monkeypatch.setattr(routes, "upsert_property", _flaky_upsert)
+
+    with caplog.at_level(logging.ERROR, logger="routes"):
+        routes._run_refresh("大安區")
+
+    assert any("Failed to process row" in record.message for record in caplog.records)
+
+    # Query raw (not via /api/properties, which filters out rows with no
+    # lat — both rows lack coordinates here since GOOGLE_API_KEY is unset
+    # in tests) to confirm the good row persisted despite the bad one.
+    conn = database.get_connection()
+    case_numbers = {
+        row["case_number"]
+        for row in conn.execute("SELECT case_number FROM properties").fetchall()
+    }
+    conn.close()
+    assert "GOOD-001" in case_numbers
+    assert "BAD-001" not in case_numbers
+
+    # cache_meta must still advance even though one row errored out, so the
+    # refresh isn't silently treated as stale/never-happened.
+    meta = database.get_cache_meta("大安區")
+    assert meta is not None and meta["last_refreshed_at"] is not None

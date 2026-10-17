@@ -5,7 +5,7 @@ from fastapi import APIRouter, HTTPException, BackgroundTasks
 from database import (
     get_properties, get_avg_prices, get_cache_meta,
     get_property_by_id, upsert_property, upsert_avg_price,
-    upsert_cache_meta, get_db,
+    upsert_cache_meta, get_geocode_cache,
 )
 from scraper import scrape_district
 from geocoder import normalize_address, geocode_address
@@ -56,31 +56,37 @@ def refresh(district: str, background_tasks: BackgroundTasks):
 
 
 def _run_refresh(district: str) -> None:
+    # This runs as a FastAPI BackgroundTask with no caller to propagate to,
+    # so uncaught exceptions here would otherwise vanish silently.
     logger.info("Starting refresh for %s", district)
-    try:
-        # 1. Scrape
-        rows = scrape_district(district)
 
-        # 2. Geocode + normalize + persist
-        geocoded_new = geocoded_cached = failed = 0
-        for row in rows:
+    # 1. Scrape. A total failure here (CAPTCHA/network) means there's nothing
+    # to persist, so abort without touching cache_meta.
+    try:
+        rows = scrape_district(district)
+    except Exception:
+        logger.exception("Scrape failed for %s; refresh aborted", district)
+        return
+
+    # 2. Geocode + normalize + persist, one row at a time so a single bad
+    # row (e.g. a geocoding/DB error) doesn't abort the whole batch and
+    # leave avg prices and cache_meta stale relative to what did persist.
+    geocode_cache = get_geocode_cache()
+    geocoded_new = geocoded_cached = failed = errored = 0
+    for row in rows:
+        try:
             addr_norm = normalize_address(row["address"])
             row["address_norm"] = addr_norm
 
-            # Check geocode cache via existing properties
-            with get_db() as conn:
-                cached = conn.execute(
-                    "SELECT lat, lng FROM properties WHERE address_norm = ? AND lat IS NOT NULL LIMIT 1",
-                    (addr_norm,),
-                ).fetchone()
-
+            cached = geocode_cache.get(addr_norm)
             if cached:
-                row["lat"], row["lng"] = cached["lat"], cached["lng"]
+                row["lat"], row["lng"] = cached
                 geocoded_cached += 1
             elif GOOGLE_API_KEY:
                 result = geocode_address(addr_norm, GOOGLE_API_KEY)
                 if result:
                     row["lat"], row["lng"] = result
+                    geocode_cache[addr_norm] = result
                     geocoded_new += 1
                 else:
                     row["lat"] = row["lng"] = None
@@ -90,20 +96,25 @@ def _run_refresh(district: str) -> None:
                 failed += 1
 
             upsert_property(row)
+        except Exception:
+            errored += 1
+            logger.exception(
+                "Failed to process row %s for %s", row.get("case_number"), district,
+            )
 
-        # 3. Fetch avg prices
+    # 3. Fetch avg prices (best-effort; a failure here shouldn't hide that
+    # properties above were still successfully refreshed).
+    try:
         avg_price_list = fetch_avg_prices(district)
         for entry in avg_price_list:
             upsert_avg_price(district, entry["property_type"], entry["avg_price"], entry["sample_count"])
-
-        # 4. Update cache meta
-        upsert_cache_meta(district)
-        logger.info(
-            "Refresh done for %s: scraped=%d new_geocode=%d cached=%d failed=%d",
-            district, len(rows), geocoded_new, geocoded_cached, failed,
-        )
     except Exception:
-        # This runs as a FastAPI BackgroundTask with no caller to propagate to,
-        # so an uncaught exception (e.g. CAPTCHA/network failure in scrape_district)
-        # would otherwise vanish silently and leave cache_meta stale with no trace.
-        logger.exception("Refresh failed for %s", district)
+        logger.exception("Failed to update avg prices for %s", district)
+
+    # 4. Update cache meta — reached as long as the scrape itself succeeded,
+    # even if some rows above errored out.
+    upsert_cache_meta(district)
+    logger.info(
+        "Refresh done for %s: scraped=%d new_geocode=%d cached=%d failed=%d errored=%d",
+        district, len(rows), geocoded_new, geocoded_cached, failed, errored,
+    )
