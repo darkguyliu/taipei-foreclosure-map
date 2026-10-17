@@ -23,7 +23,10 @@ HEADERS = {
 
 def _parse_auction_count(text: str) -> int:
     """Extract auction count from text like '2021/11/02 15:00:00第三拍'."""
-    cn_num = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6}
+    cn_num = {
+        "一": 1, "二": 2, "三": 3, "四": 4, "五": 5,
+        "六": 6, "七": 7, "八": 8, "九": 9, "十": 10,
+    }
     m = re.search(r"第([一二三四五六七八九十\d])拍", text)
     if m:
         ch = m.group(1)
@@ -171,13 +174,14 @@ def scrape_district(district: str) -> list:
     # Visit main page to initialize session
     session.get(f"{BASE_URL}/", timeout=15)
 
-    # Get CAPTCHA (the API conveniently returns the code)
-    captcha_resp = session.get(f"{BASE_URL}/Home/Captcha", timeout=15)
-    captcha_code = captcha_resp.json()["code"]
-
     all_rows = []
     page = 1
     while True:
+        # Fetch a fresh CAPTCHA for every page; the code appears to be
+        # single-use/short-lived and reusing it causes later pages to fail.
+        captcha_resp = session.get(f"{BASE_URL}/Home/Captcha", timeout=15)
+        captcha_code = captcha_resp.json()["code"]
+
         params = {
             "COUNTY": county_code,
             "AREA": area_code,

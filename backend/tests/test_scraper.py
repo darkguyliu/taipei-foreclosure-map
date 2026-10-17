@@ -78,6 +78,10 @@ def test_parse_auction_count_variants():
     assert _parse_auction_count("2021/11/02 15:00:00第二拍") == 2
     assert _parse_auction_count("2021/11/02 15:00:00第三拍") == 3
     assert _parse_auction_count("特別變賣程序後之拍賣(四拍)") == 4
+    assert _parse_auction_count("2021/11/02 15:00:00第五拍") == 5
+    assert _parse_auction_count("2021/11/02 15:00:00第六拍") == 6
+    assert _parse_auction_count("2021/11/02 15:00:00第七拍") == 7
+    assert _parse_auction_count("2021/11/02 15:00:00第十拍") == 10
 
 
 def test_parse_auction_date():
