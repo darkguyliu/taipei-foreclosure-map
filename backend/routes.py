@@ -57,7 +57,7 @@ def refresh(district: str, background_tasks: BackgroundTasks):
     # below (scrape_district("不存在區") returns [], which still passes
     # through to upsert_cache_meta).
     if not get_city_for_district(district):
-        raise HTTPException(status_code=400, detail=f"Unknown district: {district}")
+        raise HTTPException(status_code=400, detail="Unknown district")
     background_tasks.add_task(_run_refresh, district)
     return {"status": "started", "district": district}
 
@@ -86,9 +86,9 @@ def _run_refresh(district: str) -> None:
             row["address_norm"] = addr_norm
 
             if addr_norm in geocode_cache:
-                # Already resolved (possibly to None, i.e. tried and failed)
-                # earlier in this same batch — skip hitting the API again
-                # for a repeated address.
+                # Either an existing coordinate loaded from the DB, or one
+                # already attempted earlier in this batch (None = failed) —
+                # either way, skip hitting the API again for this address.
                 cached = geocode_cache[addr_norm]
                 if cached:
                     row["lat"], row["lng"] = cached

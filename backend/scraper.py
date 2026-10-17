@@ -92,6 +92,10 @@ def _extract_address_fallback(description_text: str) -> str:
         description_text,
     )
     if not m:
+        logger.debug(
+            "Address fallback didn't match (no known field label after it?): %.80s",
+            description_text,
+        )
         return ""
     candidate = m.group(1).strip()
     if not candidate or "地號" in candidate or not re.search(r"(?:[路街巷弄]|大道).*號", candidate):
