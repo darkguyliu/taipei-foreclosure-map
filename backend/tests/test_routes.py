@@ -4,7 +4,6 @@ import sqlite3
 import pytest
 from fastapi.testclient import TestClient
 import database
-import routes
 
 _TEST_DB = "file:testdb_routes?mode=memory&cache=shared&uri=true"
 database.DB_PATH = _TEST_DB
@@ -13,6 +12,10 @@ database.DB_PATH = _TEST_DB
 # is not destroyed between init_db() and the test queries.
 _keeper = sqlite3.connect(_TEST_DB, uri=True, check_same_thread=False)
 
+# Imported after DB_PATH is overridden above, matching this file's other
+# database-touching imports — routes.py doesn't currently open a connection
+# at import time, but keeping the ordering consistent avoids relying on that.
+import routes
 from database import init_db
 from main import app
 
@@ -125,6 +128,11 @@ def test_run_refresh_skips_bad_row_but_still_persists_others(monkeypatch, caplog
 
     monkeypatch.setattr(routes, "upsert_property", _flaky_upsert)
 
+    cache_meta_calls = []
+    monkeypatch.setattr(
+        routes, "upsert_cache_meta", lambda district: cache_meta_calls.append(district)
+    )
+
     with caplog.at_level(logging.ERROR, logger="routes"):
         routes._run_refresh("大安區")
 
@@ -143,9 +151,12 @@ def test_run_refresh_skips_bad_row_but_still_persists_others(monkeypatch, caplog
     assert "BAD-001" not in case_numbers
 
     # cache_meta must still advance even though one row errored out, so the
-    # refresh isn't silently treated as stale/never-happened.
-    meta = database.get_cache_meta("大安區")
-    assert meta is not None and meta["last_refreshed_at"] is not None
+    # refresh isn't silently treated as stale/never-happened. Asserted via
+    # the monkeypatched call directly (not get_cache_meta()'s current value)
+    # since the autouse fixture already seeds a non-None cache_meta row for
+    # this district before every test runs — checking "is not None" alone
+    # wouldn't actually prove this call happened.
+    assert cache_meta_calls == ["大安區"]
 
 
 def test_run_refresh_skips_cache_meta_update_when_every_row_fails(monkeypatch, caplog):

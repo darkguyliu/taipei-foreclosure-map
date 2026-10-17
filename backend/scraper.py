@@ -160,16 +160,24 @@ def _find_data_table(tables):
     return None
 
 
+class DataTableNotFoundError(RuntimeError):
+    """The results table couldn't be located in the page at all — distinct
+    from a found table with zero matching rows, which is a legitimate
+    "no listings right now" result. Raised instead of returning [] so a
+    site layout change surfaces as a scrape failure (skips cache_meta,
+    allows retry) rather than looking identical to a real empty district.
+    """
+
+
 def parse_auction_rows(html: str, district: str, city: str = None) -> list:
     """Parse table rows from query result HTML."""
     city = city or get_city_for_district(district) or "台北市"
     soup = BeautifulSoup(html, "html.parser")
     data_table = _find_data_table(soup.find_all("table"))
     if data_table is None:
-        logger.warning(
-            "No data table found for %s (page layout may have changed)", district,
+        raise DataTableNotFoundError(
+            f"No data table found for {district} (page layout may have changed)"
         )
-        return []
 
     rows = []
     for tr in data_table.find_all("tr"):

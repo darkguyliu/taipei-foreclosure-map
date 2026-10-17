@@ -2,7 +2,7 @@ import logging
 import pytest
 from scraper import (
     parse_auction_rows, _parse_auction_count, _parse_auction_date, scrape_district,
-    _extract_address_fallback, _cjk_to_int,
+    _extract_address_fallback, _cjk_to_int, DataTableNotFoundError,
 )
 
 SAMPLE_HTML = """
@@ -104,11 +104,13 @@ def test_cjk_to_int_logs_warning_on_unrecognized_token(caplog):
     assert sum("Unrecognized auction-count token" in r.message for r in caplog.records) == 2
 
 
-def test_parse_logs_warning_when_no_data_table_found(caplog):
-    with caplog.at_level(logging.WARNING, logger="scraper"):
-        rows = parse_auction_rows("<p>not a table at all</p>", district="大安區")
-    assert rows == []
-    assert any("No data table found" in r.message for r in caplog.records)
+def test_parse_raises_when_no_data_table_found():
+    # Distinct from "table found, zero matching rows" (a legitimate empty
+    # district) — raising here lets the caller treat it as a scrape
+    # failure (skip cache_meta, allow retry) instead of a real empty
+    # result, in case the live site's layout changes again.
+    with pytest.raises(DataTableNotFoundError):
+        parse_auction_rows("<p>not a table at all</p>", district="大安區")
 
 
 def test_parse_infers_new_taipei_prefix_from_district():

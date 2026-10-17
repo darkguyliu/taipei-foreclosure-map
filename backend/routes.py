@@ -78,15 +78,22 @@ def _run_refresh(district: str) -> None:
             addr_norm = normalize_address(row["address"])
             row["address_norm"] = addr_norm
 
-            cached = geocode_cache.get(addr_norm)
-            if cached:
-                row["lat"], row["lng"] = cached
-                geocoded_cached += 1
+            if addr_norm in geocode_cache:
+                # Already resolved (possibly to None, i.e. tried and failed)
+                # earlier in this same batch — skip hitting the API again
+                # for a repeated address.
+                cached = geocode_cache[addr_norm]
+                if cached:
+                    row["lat"], row["lng"] = cached
+                    geocoded_cached += 1
+                else:
+                    row["lat"] = row["lng"] = None
+                    failed += 1
             elif GOOGLE_API_KEY:
                 result = geocode_address(addr_norm, GOOGLE_API_KEY)
+                geocode_cache[addr_norm] = result
                 if result:
                     row["lat"], row["lng"] = result
-                    geocode_cache[addr_norm] = result
                     geocoded_new += 1
                 else:
                     row["lat"] = row["lng"] = None
@@ -111,10 +118,12 @@ def _run_refresh(district: str) -> None:
     except Exception:
         logger.exception("Failed to update avg prices for %s", district)
 
-    # 4. Update cache meta — but not if every single row errored out, or a
-    # fully-broken refresh (e.g. DB locked, geocoding API down) would mark
-    # the district as freshly updated and block retries until the TTL
-    # expires, even though nothing was actually persisted.
+    # 4. Update cache meta — but not if every single row raised while being
+    # processed (e.g. DB locked), which would otherwise mark the district
+    # as freshly updated and block retries until the TTL expires, even
+    # though nothing was actually persisted. A geocoding failure alone
+    # doesn't hit this path — it's counted in `failed` and the row still
+    # persists with lat/lng left null.
     if not rows or errored < len(rows):
         upsert_cache_meta(district)
     else:
