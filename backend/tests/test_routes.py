@@ -1,8 +1,10 @@
 # backend/tests/test_routes.py
+import logging
 import sqlite3
 import pytest
 from fastapi.testclient import TestClient
 import database
+import routes
 
 _TEST_DB = "file:testdb_routes?mode=memory&cache=shared&uri=true"
 database.DB_PATH = _TEST_DB
@@ -81,9 +83,6 @@ def test_get_property_not_found():
 
 
 def test_run_refresh_does_not_raise_when_scrape_fails(monkeypatch, caplog):
-    import logging
-    import routes
-
     def _boom(district):
         raise RuntimeError("CAPTCHA fetch failed")
 

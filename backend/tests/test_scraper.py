@@ -171,6 +171,13 @@ def test_address_fallback_rejects_land_lot_with_trailing_text():
     assert _extract_address_fallback(text) == ""
 
 
+def test_address_fallback_accepts_boulevard_addresses():
+    # "大道" (e.g. 市民大道, 凱達格蘭大道) is a common Taipei street type
+    # that doesn't contain 路/街/巷/弄 — must not be rejected as a non-address.
+    text = "地址/完整地號：臺北市中正區市民大道一段100號底價：100"
+    assert _extract_address_fallback(text) == "臺北市中正區市民大道一段100號"
+
+
 def test_parse_ignores_decoy_tables_around_data_table():
     # Extra shell tables (pagination widgets etc.) shouldn't shift which
     # table gets parsed as data, since lookup is now header-driven, not
