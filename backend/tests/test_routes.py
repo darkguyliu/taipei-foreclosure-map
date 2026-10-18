@@ -133,17 +133,16 @@ def test_refresh_rejects_when_already_in_progress():
     routes._refreshing["士林區"] = time.monotonic()
     try:
         resp = client.post("/api/refresh?district=士林區")
-        assert resp.status_code == 429
+        assert resp.status_code == 409  # resource conflict, not a rate limit
         assert "Retry-After" in resp.headers
     finally:
         routes._refreshing.pop("士林區", None)
 
 
 def test_refresh_allows_retry_once_in_progress_entry_is_stale(monkeypatch):
-    # An entry older than MAX_REFRESH_DURATION_SECONDS means the previous
-    # BackgroundTask likely never actually ran (e.g. the process died
-    # between accepting the request and running it) — it must not block
-    # this district forever.
+    # An entry older than MAX_REFRESH_DURATION_SECONDS means the
+    # BackgroundTask likely never actually ran within this process — it
+    # must not block this district forever.
     monkeypatch.setattr(routes, "scrape_district", lambda district: [])
     monkeypatch.setattr(routes, "fetch_avg_prices", lambda district: [])
 
@@ -151,6 +150,23 @@ def test_refresh_allows_retry_once_in_progress_entry_is_stale(monkeypatch):
 
     resp = client.post("/api/refresh?district=北投區")
     assert resp.status_code == 200
+
+
+def test_run_refresh_guarded_does_not_clobber_a_newer_entry(monkeypatch):
+    # If a stale call's _refreshing entry has already been replaced by a
+    # newer request's attempt (this one went stale and a second request
+    # started), the stale call's cleanup must not delete that newer entry
+    # — otherwise a third request could start concurrently with the
+    # second, defeating the whole point of the guard.
+    monkeypatch.setattr(routes, "scrape_district", lambda district: [])
+    monkeypatch.setattr(routes, "fetch_avg_prices", lambda district: [])
+
+    stale_started_at = time.monotonic() - routes.MAX_REFRESH_DURATION_SECONDS - 100
+    routes._refreshing["內湖區"] = time.monotonic()  # a newer, legit in-progress entry
+
+    routes._run_refresh_guarded("內湖區", stale_started_at)
+
+    assert "內湖區" in routes._refreshing
 
 
 def test_refresh_starts_for_district_without_recent_cache_meta(monkeypatch):

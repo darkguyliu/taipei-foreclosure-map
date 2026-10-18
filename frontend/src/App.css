@@ -55,6 +55,11 @@
 
 .refresh-btn:hover { background: #2a4a2a; }
 
+.refresh-error {
+  font-size: 13px;
+  color: #ff8a8a;
+}
+
 /* FilterPanel */
 .filter-panel { display: flex; flex-direction: column; gap: 8px; }
 

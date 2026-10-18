@@ -41,9 +41,11 @@ _last_attempt: Dict[str, float] = {}
 # *same* district each loading their own geocode_cache snapshot and
 # re-geocoding (and re-paying for) the same new addresses. An entry older
 # than MAX_REFRESH_DURATION_SECONDS is treated as stale rather than still
-# "in progress" — if the BackgroundTask never actually ran (e.g. the
-# process was killed between accepting the request and running it), the
-# district would otherwise be stuck rejecting every refresh until restart.
+# "in progress" — this is for the case where the BackgroundTask is never
+# actually run within this same process (e.g. an error during response
+# handling after the slot was taken but before the task got scheduled),
+# not a process restart: _refreshing lives in memory, so a restart clears
+# it anyway and this entry wouldn't survive that regardless.
 #
 # Guarded by the same lock as _last_attempt so the recency check and the
 # in-progress check are one atomic step — otherwise two requests arriving
@@ -110,8 +112,10 @@ def refresh(district: str, background_tasks: BackgroundTasks):
 
         started_at = _refreshing.get(district)
         if started_at is not None and now - started_at < MAX_REFRESH_DURATION_SECONDS:
+            # 409: this is a resource-state conflict (already running),
+            # not a rate limit.
             raise HTTPException(
-                status_code=429,
+                status_code=409,
                 detail="Refresh already in progress for this district",
                 headers={"Retry-After": "60"},
             )
@@ -119,16 +123,22 @@ def refresh(district: str, background_tasks: BackgroundTasks):
         _refreshing[district] = now
         _last_attempt[district] = now
 
-    background_tasks.add_task(_run_refresh_guarded, district)
+    background_tasks.add_task(_run_refresh_guarded, district, now)
     return {"status": "started", "district": district}
 
 
-def _run_refresh_guarded(district: str) -> None:
+def _run_refresh_guarded(district: str, started_at: float) -> None:
     try:
         _run_refresh(district)
     finally:
         with _refresh_lock:
-            _refreshing.pop(district, None)
+            # Only clear the entry this call itself created. If it went
+            # stale (ran past MAX_REFRESH_DURATION_SECONDS) and a newer
+            # request already took the slot, that slot belongs to the new
+            # request now — blindly popping here would delete it and let
+            # a third request start concurrently with the second.
+            if _refreshing.get(district) == started_at:
+                _refreshing.pop(district, None)
 
 
 def _run_refresh(district: str) -> None:

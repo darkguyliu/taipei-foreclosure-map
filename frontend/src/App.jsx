@@ -16,6 +16,7 @@ export default function App() {
   const [filters, setFilters] = useState({})
   const [selectedProperty, setSelectedProperty] = useState(null)
   const [activeTab, setActiveTab] = useState('all') // 'all' | 'favorites'
+  const [refreshError, setRefreshError] = useState('')
 
   const { properties, lastRefreshedAt, loading, error } = useProperties(district, filters)
   const { getAvgPrice } = useAvgPrices(district)
@@ -23,7 +24,17 @@ export default function App() {
 
   async function handleRefresh() {
     if (!district) return
-    await fetch(`/api/refresh?district=${encodeURIComponent(district)}`, { method: 'POST' })
+    setRefreshError('')
+    const resp = await fetch(`/api/refresh?district=${encodeURIComponent(district)}`, { method: 'POST' })
+    if (!resp.ok) {
+      // 429 (throttled) or 409 (already in progress) — don't reload, the
+      // user needs to know nothing new was triggered.
+      const retryAfter = resp.headers.get('Retry-After')
+      const body = await resp.json().catch(() => ({}))
+      const detail = body.detail || '刷新失敗'
+      setRefreshError(retryAfter ? `${detail}（請 ${retryAfter} 秒後再試）` : detail)
+      return
+    }
     // Reload after a short delay to allow background task to complete
     setTimeout(() => window.location.reload(), 3000)
   }
@@ -57,6 +68,7 @@ export default function App() {
               🔄 刷新資料
             </button>
           )}
+          {refreshError && <span className="refresh-error">{refreshError}</span>}
         </header>
         <div className="app-body">
           <Sidebar

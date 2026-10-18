@@ -273,34 +273,37 @@ def scrape_district(district: str) -> list:
     all_rows = []
     page = 1
     while True:
-        # Fetch a fresh CAPTCHA for every page; the code appears to be
-        # single-use/short-lived and reusing it causes later pages to fail.
-        captcha_resp = session.get(f"{BASE_URL}/Home/Captcha", timeout=15)
-        captcha_code = captcha_resp.json()["code"]
-
-        params = {
-            "COUNTY": county_code,
-            "AREA": area_code,
-            "CAPTCHA": captcha_code,
-            "REQUERY": "false" if page == 1 else "true",
-            "PAGINATION_PAGE_NO": str(page),
-        }
-        resp = session.get(f"{BASE_URL}/Estate/Query", params=params, timeout=20)
-        resp.raise_for_status()
-
         try:
+            # Fetch a fresh CAPTCHA for every page; the code appears to be
+            # single-use/short-lived and reusing it causes later pages to fail.
+            captcha_resp = session.get(f"{BASE_URL}/Home/Captcha", timeout=15)
+            captcha_code = captcha_resp.json()["code"]
+
+            params = {
+                "COUNTY": county_code,
+                "AREA": area_code,
+                "CAPTCHA": captcha_code,
+                "REQUERY": "false" if page == 1 else "true",
+                "PAGINATION_PAGE_NO": str(page),
+            }
+            resp = session.get(f"{BASE_URL}/Estate/Query", params=params, timeout=20)
+            resp.raise_for_status()
+
             rows = parse_auction_rows(resp.text, district, city)
-        except DataTableNotFoundError:
+        except Exception as exc:
             if page == 1:
                 raise  # no data at all — a real scrape failure, not "0 results"
             # Already-collected pages are kept, but the caller must not
             # treat this as a fully successful scrape (e.g. for cache_meta)
             # since later pages may hold rows that were never collected.
+            # Deliberately broad: a network timeout or bad CAPTCHA response
+            # on page 2+ shouldn't discard page 1 either, not just a
+            # missing-table parse failure.
             logger.warning(
-                "No data table on page %d for %s; stopping with %d rows collected",
-                page, district, len(all_rows),
+                "Page %d failed for %s (%s); stopping with %d rows collected",
+                page, district, type(exc).__name__, len(all_rows),
             )
-            raise PartialScrapeError(all_rows)
+            raise PartialScrapeError(all_rows) from exc
 
         all_rows.extend(rows)
 

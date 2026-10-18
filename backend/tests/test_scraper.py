@@ -179,6 +179,28 @@ def test_scrape_district_keeps_earlier_pages_if_a_later_page_has_no_table(monkey
     assert exc_info.value.rows == page1_rows
 
 
+def test_scrape_district_treats_any_later_page_failure_as_partial(monkeypatch):
+    # Not just DataTableNotFoundError — a network timeout, a bad CAPTCHA
+    # response, or any other failure on page 2+ must also preserve
+    # earlier pages instead of discarding them as a total scrape failure.
+    monkeypatch.setattr(scraper_module.requests, "Session", _FakeSession)
+
+    page1_rows = [{"case_number": "P1-1"}]
+    calls = {"n": 0}
+
+    def _fake_parse(html, district, city=None):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return page1_rows
+        raise ConnectionError("network blip")
+
+    monkeypatch.setattr(scraper_module, "parse_auction_rows", _fake_parse)
+
+    with pytest.raises(scraper_module.PartialScrapeError) as exc_info:
+        scraper_module.scrape_district("大安區")
+    assert exc_info.value.rows == page1_rows
+
+
 def test_scrape_district_raises_if_first_page_has_no_table(monkeypatch):
     # No prior pages to preserve here — this is a real scrape failure, not
     # "the district legitimately has zero listings".
