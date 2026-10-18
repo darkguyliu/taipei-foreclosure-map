@@ -33,11 +33,13 @@ def setup_db():
     conn.execute("DELETE FROM cache_meta")
     conn.commit()
     conn.close()
-    # Both are process-local state, not DB state, so they'd otherwise leak
-    # across tests (e.g. a 429 from one test's throttle check firing in a
-    # later, unrelated test for the same district).
+    # All process-local state, not DB state, so it'd otherwise leak across
+    # tests (e.g. a 429 from one test's throttle check firing in a later,
+    # unrelated test for the same district — or, for the global one, any
+    # other district).
     routes._last_attempt.clear()
     routes._refreshing.clear()
+    routes._last_global_attempt = None
     upsert_property({
         "case_number": "ROUTE-001",
         "court": "台北地院",
@@ -123,6 +125,38 @@ def test_refresh_throttles_even_after_a_failed_attempt(monkeypatch):
 
     second = client.post("/api/refresh?district=信義區")
     assert second.status_code == 429
+
+
+def test_refresh_global_throttle_blocks_different_districts(monkeypatch):
+    # The per-district cooldown alone doesn't bound a caller cycling
+    # through many different districts in turn — each individually
+    # satisfies its own 5-minute gap, but the site and the paid Geocoding
+    # API still get hit continuously. This caps the rate across all
+    # districts combined.
+    monkeypatch.setattr(routes, "scrape_district", lambda district: [])
+    monkeypatch.setattr(routes, "fetch_avg_prices", lambda district: [])
+
+    first = client.post("/api/refresh?district=信義區")
+    assert first.status_code == 200
+
+    second = client.post("/api/refresh?district=士林區")
+    assert second.status_code == 429
+    assert "Retry-After" in second.headers
+
+
+def test_refresh_in_progress_takes_precedence_over_recency_check():
+    # Both conditions are true at once here; the in-progress check must
+    # win (409) — checking recency (429) first would mask the in-progress
+    # state for nearly all of a scrape's actual duration, since the
+    # recency window (5 min) is far longer than a scrape typically takes.
+    now = time.monotonic()
+    routes._refreshing["內湖區"] = now
+    routes._last_attempt["內湖區"] = now
+    try:
+        resp = client.post("/api/refresh?district=內湖區")
+        assert resp.status_code == 409
+    finally:
+        routes._refreshing.pop("內湖區", None)
 
 
 def test_refresh_rejects_when_already_in_progress():

@@ -277,6 +277,7 @@ def scrape_district(district: str) -> list:
             # Fetch a fresh CAPTCHA for every page; the code appears to be
             # single-use/short-lived and reusing it causes later pages to fail.
             captcha_resp = session.get(f"{BASE_URL}/Home/Captcha", timeout=15)
+            captcha_resp.raise_for_status()
             captcha_code = captcha_resp.json()["code"]
 
             params = {
@@ -300,8 +301,8 @@ def scrape_district(district: str) -> list:
             # on page 2+ shouldn't discard page 1 either, not just a
             # missing-table parse failure.
             logger.warning(
-                "Page %d failed for %s (%s); stopping with %d rows collected",
-                page, district, type(exc).__name__, len(all_rows),
+                "Page %d failed for %s; stopping with %d rows collected",
+                page, district, len(all_rows), exc_info=True,
             )
             raise PartialScrapeError(all_rows) from exc
 

@@ -11,6 +11,12 @@ import './App.css'
 
 const MAPS_API_KEY = import.meta.env.VITE_GOOGLE_MAPS_API_KEY || ''
 
+const REFRESH_STATUS_MESSAGES = {
+  400: '無效的行政區',
+  409: '此行政區正在刷新中',
+  429: '請求過於頻繁',
+}
+
 export default function App() {
   const [district, setDistrict] = useState('')
   const [filters, setFilters] = useState({})
@@ -22,17 +28,32 @@ export default function App() {
   const { getAvgPrice } = useAvgPrices(district)
   const { favoriteIds, toggleFavorite, isFavorite } = useFavorites()
 
+  // Clear any stale throttle/error message from the previous district —
+  // otherwise it lingers on screen after switching districts. Done in the
+  // change handler itself rather than a useEffect on `district`, since an
+  // effect that unconditionally calls setState on every change just
+  // triggers an extra render for no benefit here.
+  function handleDistrictChange(newDistrict) {
+    setDistrict(newDistrict)
+    setRefreshError('')
+  }
+
   async function handleRefresh() {
     if (!district) return
     setRefreshError('')
-    const resp = await fetch(`/api/refresh?district=${encodeURIComponent(district)}`, { method: 'POST' })
+    let resp
+    try {
+      resp = await fetch(`/api/refresh?district=${encodeURIComponent(district)}`, { method: 'POST' })
+    } catch {
+      setRefreshError('刷新失敗，請檢查網路連線')
+      return
+    }
     if (!resp.ok) {
       // 429 (throttled) or 409 (already in progress) — don't reload, the
       // user needs to know nothing new was triggered.
       const retryAfter = resp.headers.get('Retry-After')
-      const body = await resp.json().catch(() => ({}))
-      const detail = body.detail || '刷新失敗'
-      setRefreshError(retryAfter ? `${detail}（請 ${retryAfter} 秒後再試）` : detail)
+      const message = REFRESH_STATUS_MESSAGES[resp.status] || '刷新失敗'
+      setRefreshError(retryAfter ? `${message}（請 ${retryAfter} 秒後再試）` : message)
       return
     }
     // Reload after a short delay to allow background task to complete
@@ -62,7 +83,7 @@ export default function App() {
       <div className="app-layout">
         <header className="app-header">
           <span className="app-title">🏠 雙北法拍屋地圖</span>
-          <DistrictSelector selected={district} onChange={setDistrict} />
+          <DistrictSelector selected={district} onChange={handleDistrictChange} />
           {district && (
             <button className="refresh-btn" onClick={handleRefresh}>
               🔄 刷新資料
