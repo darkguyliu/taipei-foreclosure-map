@@ -126,21 +126,29 @@ def upsert_cache_meta(district: str) -> None:
         """, (district,))
 
 
-def get_geocode_cache(address_norms: Iterable[str]) -> Dict[str, Optional[Tuple[float, float]]]:
+_GEOCODE_CACHE_QUERY_CHUNK = 500  # stay well under SQLite's variable-count limit
+
+
+def get_geocode_cache(address_norms: Iterable[Optional[str]]) -> Dict[str, Tuple[float, float]]:
     """Map each of the given address_norm values to its (lat, lng) where
-    already geocoded, via a single bulk lookup scoped to this batch instead
-    of one query per row (or loading every district's history)."""
+    already geocoded, via bulk lookups scoped to this batch instead of one
+    query per row (or loading every district's history). None entries
+    (e.g. an address that failed to normalize) are ignored."""
     distinct = list({a for a in address_norms if a})
     if not distinct:
         return {}
-    placeholders = ",".join("?" * len(distinct))
+    cache: Dict[str, Tuple[float, float]] = {}
     with get_db() as conn:
-        rows = conn.execute(
-            f"SELECT address_norm, lat, lng FROM properties "
-            f"WHERE lat IS NOT NULL AND address_norm IN ({placeholders})",
-            distinct,
-        ).fetchall()
-    return {row["address_norm"]: (row["lat"], row["lng"]) for row in rows}
+        for i in range(0, len(distinct), _GEOCODE_CACHE_QUERY_CHUNK):
+            chunk = distinct[i:i + _GEOCODE_CACHE_QUERY_CHUNK]
+            placeholders = ",".join("?" * len(chunk))
+            rows = conn.execute(
+                f"SELECT address_norm, lat, lng FROM properties "
+                f"WHERE lat IS NOT NULL AND address_norm IN ({placeholders})",
+                chunk,
+            ).fetchall()
+            cache.update((row["address_norm"], (row["lat"], row["lng"])) for row in rows)
+    return cache
 
 
 def get_properties(

@@ -1,6 +1,7 @@
 # backend/tests/test_routes.py
 import logging
 import sqlite3
+from datetime import datetime
 import pytest
 from fastapi.testclient import TestClient
 import database
@@ -32,6 +33,11 @@ def setup_db():
     conn.execute("DELETE FROM cache_meta")
     conn.commit()
     conn.close()
+    # Both are process-local state, not DB state, so they'd otherwise leak
+    # across tests (e.g. a 429 from one test's throttle check firing in a
+    # later, unrelated test for the same district).
+    routes._last_attempt.clear()
+    routes._refreshing.clear()
     upsert_property({
         "case_number": "ROUTE-001",
         "court": "台北地院",
@@ -94,13 +100,28 @@ def test_refresh_rejects_unknown_district():
 
 
 def test_refresh_rejects_recently_refreshed_district():
-    # The autouse fixture just seeded cache_meta for 大安區 via
-    # upsert_cache_meta, so last_refreshed_at is "now" — well within
-    # MIN_REFRESH_INTERVAL. Without this check, a POST /refresh triggers a
-    # real scrape plus paid geocoding calls with no limit on how often a
-    # caller can hit it.
+    # Without this check, a POST /refresh triggers a real scrape plus paid
+    # geocoding calls with no limit on how often a caller can hit it.
+    routes._last_attempt["大安區"] = datetime.now()
     resp = client.post("/api/refresh?district=大安區")
     assert resp.status_code == 429
+
+
+def test_refresh_throttles_even_after_a_failed_attempt(monkeypatch):
+    # The throttle is keyed off _last_attempt (set when a request is
+    # accepted), not cache_meta.last_refreshed_at (only set on a
+    # *successful* refresh) — otherwise a district whose scrape keeps
+    # failing would never actually be throttled.
+    def _boom(district):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(routes, "scrape_district", _boom)
+
+    first = client.post("/api/refresh?district=信義區")
+    assert first.status_code == 200
+
+    second = client.post("/api/refresh?district=信義區")
+    assert second.status_code == 429
 
 
 def test_refresh_rejects_when_already_in_progress():
@@ -166,6 +187,39 @@ def test_run_refresh_partial_scrape_persists_rows_but_skips_cache_meta(monkeypat
     }
     conn.close()
     assert "PARTIAL-001" in case_numbers  # still persisted despite being partial
+
+
+def test_run_refresh_survives_geocode_cache_failure(monkeypatch, caplog):
+    rows = [{
+        "case_number": "CACHEFAIL-001", "court": "台北地院", "district": "大安區",
+        "address": "台北市大安區仁愛路一段1號", "floor_price": 1_000_000,
+        "area": 10.0, "property_type": "住宅", "auction_count": 1,
+        "auction_date": "2026-05-01", "auction_url": "",
+    }]
+    monkeypatch.setattr(routes, "scrape_district", lambda district: rows)
+    monkeypatch.setattr(routes, "fetch_avg_prices", lambda district: [])
+    monkeypatch.setattr(routes, "GOOGLE_API_KEY", "")
+
+    def _boom(address_norms):
+        raise RuntimeError("DB locked")
+
+    monkeypatch.setattr(routes, "get_geocode_cache", _boom)
+
+    # A broken geocode cache lookup must not abort the whole refresh (this
+    # file's own design rule: a BackgroundTask must never fail silently,
+    # nor should one failed step take down everything after it).
+    with caplog.at_level(logging.ERROR, logger="routes"):
+        routes._run_refresh("大安區")
+
+    assert any("Failed to load geocode cache" in record.message for record in caplog.records)
+
+    conn = database.get_connection()
+    case_numbers = {
+        row["case_number"]
+        for row in conn.execute("SELECT case_number FROM properties").fetchall()
+    }
+    conn.close()
+    assert "CACHEFAIL-001" in case_numbers  # still persisted, just without a cache hit
 
 
 def test_run_refresh_does_not_raise_when_scrape_fails(monkeypatch, caplog):

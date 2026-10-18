@@ -124,6 +124,26 @@ def test_get_geocode_cache_empty_input_returns_empty_dict():
     assert get_geocode_cache([]) == {}
 
 
+def test_get_geocode_cache_chunks_large_batches(monkeypatch):
+    # Force a tiny chunk size so 5 addresses require 3 round trips, and
+    # confirm the results still merge correctly — guards against the
+    # SQLite host-parameter limit a single unchunked IN (...) could hit.
+    monkeypatch.setattr(database, "_GEOCODE_CACHE_QUERY_CHUNK", 2)
+    addresses = [f"台北市大安區測試路{i}號" for i in range(5)]
+    for i, addr in enumerate(addresses):
+        upsert_property({
+            "case_number": f"CHUNK-{i}", "court": "台北地院", "district": "大安區",
+            "address": addr, "address_norm": addr,
+            "lat": 25.0 + i, "lng": 121.0 + i,
+            "floor_price": 1_000_000, "area": 10.0, "property_type": "住宅",
+            "auction_count": 1, "auction_date": "2026-04-01", "auction_url": "",
+        })
+    cache = get_geocode_cache(addresses)
+    assert len(cache) == 5
+    for i, addr in enumerate(addresses):
+        assert cache[addr] == (25.0 + i, 121.0 + i)
+
+
 def test_get_properties_filter_by_price():
     for i, price in enumerate([3_000_000, 8_000_000, 15_000_000]):
         upsert_property({

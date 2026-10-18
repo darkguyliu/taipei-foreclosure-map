@@ -21,15 +21,25 @@ GOOGLE_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY", "")
 
 # A refresh scrapes the live site and can call the paid Google Geocoding
 # API per new address, so it's throttled per district rather than left
-# open to unlimited calls.
+# open to unlimited calls. Tracked here (not via cache_meta.last_refreshed_at)
+# because that column is only written on a *successful* refresh — keying
+# the throttle off it would mean a district that keeps failing to scrape
+# is never actually throttled. This state is process-local: it only
+# guards a single uvicorn worker, which matches how this app is run (see
+# .claude/launch.json — no --workers flag). A multi-worker deployment
+# would need a DB-backed lock instead.
 MIN_REFRESH_INTERVAL = timedelta(minutes=5)
+_last_attempt: dict = {}
 
 # Districts with a refresh currently running as a BackgroundTask. Guards
 # against two concurrent refreshes of the *same* district each loading
 # their own geocode_cache snapshot and re-geocoding (and re-paying for)
-# the same new addresses.
+# the same new addresses. Guarded by the same lock as _last_attempt so the
+# recency check and the in-progress check are one atomic step — otherwise
+# two requests arriving close together could both pass the recency check
+# before either one takes the in-progress flag.
 _refreshing: set = set()
-_refreshing_lock = threading.Lock()
+_refresh_lock = threading.Lock()
 
 
 @router.get("/properties")
@@ -73,16 +83,14 @@ def refresh(district: str, background_tasks: BackgroundTasks):
     if not get_city_for_district(district):
         raise HTTPException(status_code=400, detail="Unknown district")
 
-    meta = get_cache_meta(district)
-    if meta and meta["last_refreshed_at"]:
-        last_refreshed = datetime.strptime(meta["last_refreshed_at"], "%Y-%m-%d %H:%M:%S")
-        if datetime.now() - last_refreshed < MIN_REFRESH_INTERVAL:
+    with _refresh_lock:
+        last_attempt = _last_attempt.get(district)
+        if last_attempt and datetime.now() - last_attempt < MIN_REFRESH_INTERVAL:
             raise HTTPException(status_code=429, detail="Refreshed too recently, try again later")
-
-    with _refreshing_lock:
         if district in _refreshing:
             raise HTTPException(status_code=429, detail="Refresh already in progress for this district")
         _refreshing.add(district)
+        _last_attempt[district] = datetime.now()
 
     background_tasks.add_task(_run_refresh_guarded, district)
     return {"status": "started", "district": district}
@@ -92,7 +100,7 @@ def _run_refresh_guarded(district: str) -> None:
     try:
         _run_refresh(district)
     finally:
-        with _refreshing_lock:
+        with _refresh_lock:
             _refreshing.discard(district)
 
 
@@ -131,7 +139,13 @@ def _run_refresh(district: str) -> None:
         except Exception:
             address_norms.append(None)
 
-    geocode_cache = get_geocode_cache(address_norms)
+    try:
+        geocode_cache = get_geocode_cache(address_norms)
+    except Exception:
+        logger.exception(
+            "Failed to load geocode cache for %s; proceeding without it", district,
+        )
+        geocode_cache = {}
     geocoded_new = geocoded_cached = failed = errored = 0
     for row, addr_norm in zip(rows, address_norms):
         try:
