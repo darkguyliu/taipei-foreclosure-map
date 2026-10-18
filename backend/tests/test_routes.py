@@ -168,7 +168,6 @@ def test_refresh_rejects_when_already_in_progress():
     try:
         resp = client.post("/api/refresh?district=士林區")
         assert resp.status_code == 409  # resource conflict, not a rate limit
-        assert "Retry-After" in resp.headers
     finally:
         routes._refreshing.pop("士林區", None)
 

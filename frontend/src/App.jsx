@@ -1,5 +1,5 @@
 // frontend/src/App.jsx
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { APIProvider } from '@vis.gl/react-google-maps'
 import { DistrictSelector } from './components/DistrictSelector'
 import { Sidebar } from './components/Sidebar'
@@ -23,10 +23,19 @@ export default function App() {
   const [selectedProperty, setSelectedProperty] = useState(null)
   const [activeTab, setActiveTab] = useState('all') // 'all' | 'favorites'
   const [refreshError, setRefreshError] = useState('')
+  const [refreshing, setRefreshing] = useState(false)
 
   const { properties, lastRefreshedAt, loading, error } = useProperties(district, filters)
   const { getAvgPrice } = useAvgPrices(district)
   const { favoriteIds, toggleFavorite, isFavorite } = useFavorites()
+
+  // `district` inside handleRefresh's closure is the value from the render
+  // that created it — it never changes after an await, so comparing
+  // against it directly is always true. This ref always holds the latest
+  // value instead, independent of which render's closure is still
+  // running. Updated only in the event handler below (never during
+  // render) since district only ever changes through it.
+  const districtRef = useRef(district)
 
   // Clear any stale throttle/error message from the previous district —
   // otherwise it lingers on screen after switching districts. Done in the
@@ -34,19 +43,23 @@ export default function App() {
   // effect that unconditionally calls setState on every change just
   // triggers an extra render for no benefit here.
   function handleDistrictChange(newDistrict) {
+    districtRef.current = newDistrict
     setDistrict(newDistrict)
     setRefreshError('')
+    setRefreshing(false)
   }
 
   async function handleRefresh() {
-    if (!district) return
+    if (!district || refreshing) return
     const requestedDistrict = district // snapshot — the user may switch away before this resolves
     setRefreshError('')
+    setRefreshing(true)
     let resp
     try {
       resp = await fetch(`/api/refresh?district=${encodeURIComponent(requestedDistrict)}`, { method: 'POST' })
     } catch {
-      if (district === requestedDistrict) setRefreshError('刷新失敗，請檢查網路連線')
+      if (districtRef.current === requestedDistrict) setRefreshError('刷新失敗，請檢查網路連線')
+      setRefreshing(false)
       return
     }
     if (!resp.ok) {
@@ -55,11 +68,12 @@ export default function App() {
       // they're still looking at the district it's actually about —
       // otherwise a slow response for a district they've since left
       // would show up as an error on whatever they switched to instead.
-      if (district === requestedDistrict) {
+      if (districtRef.current === requestedDistrict) {
         const retryAfter = resp.headers.get('Retry-After')
         const message = REFRESH_STATUS_MESSAGES[resp.status] || '刷新失敗'
         setRefreshError(retryAfter ? `${message}（請 ${retryAfter} 秒後再試）` : message)
       }
+      setRefreshing(false)
       return
     }
     // Reload after a short delay to allow background task to complete
@@ -91,8 +105,8 @@ export default function App() {
           <span className="app-title">🏠 雙北法拍屋地圖</span>
           <DistrictSelector selected={district} onChange={handleDistrictChange} />
           {district && (
-            <button className="refresh-btn" onClick={handleRefresh}>
-              🔄 刷新資料
+            <button className="refresh-btn" onClick={handleRefresh} disabled={refreshing}>
+              {refreshing ? '⏳ 刷新中...' : '🔄 刷新資料'}
             </button>
           )}
           {refreshError && <span className="refresh-error">{refreshError}</span>}

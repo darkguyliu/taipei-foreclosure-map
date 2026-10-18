@@ -122,11 +122,24 @@ def refresh(district: str, background_tasks: BackgroundTasks):
         # actual duration, and callers only ever see 409 in the rare case
         # the scrape runs past 5 minutes.
         started_at = _refreshing.get(district)
-        if started_at is not None and now - started_at < MAX_REFRESH_DURATION_SECONDS:
-            raise HTTPException(
-                status_code=409,
-                detail="Refresh already in progress for this district",
-                headers={"Retry-After": "60"},
+        if started_at is not None:
+            if now - started_at < MAX_REFRESH_DURATION_SECONDS:
+                # No Retry-After here: we genuinely don't know how much
+                # longer the in-flight refresh has left, and a made-up
+                # number (e.g. a flat 60s) would just mislead the caller
+                # into waiting the wrong amount of time.
+                raise HTTPException(
+                    status_code=409,
+                    detail="Refresh already in progress for this district",
+                )
+            # Stale — the previous refresh's entry is being taken over by
+            # this request. Logged because it means either a genuinely
+            # slow scrape just got raced by a concurrent duplicate, or the
+            # prior BackgroundTask never ran at all; worth being able to
+            # tell which happened after the fact.
+            logger.warning(
+                "Stale in-progress entry for %s (%.0fs old); taking it over",
+                district, now - started_at,
             )
 
         last_attempt = _last_attempt.get(district)
