@@ -86,14 +86,18 @@ def _extract_address_fallback(description_text: str) -> str:
     then ：" pattern — the address's own trailing 號 can fuse with the
     next label's first characters into something that looks like one.
     """
-    stop_labels = "底價|面積|權利範圍|用途|使用分區|建物|持分|使用現況|點交|稅捐"
+    stop_labels = (
+        "底價|面積|權利範圍|用途|使用分區|建物|持分|使用現況|點交|稅捐"
+        "|坐落|備註|車位|他項權利|建號|使用執照"
+    )
     m = re.search(
         rf"地址/完整地號[：:]\s*([^，,。]{{1,60}}?)(?=[，,。]|(?:{stop_labels})[：:]|$)",
         description_text,
     )
     if not m:
-        logger.debug(
-            "Address fallback didn't match (no known field label after it?): %.80s",
+        logger.warning(
+            "Address fallback didn't match (no known field label after it?"
+            " — may need to add a label to stop_labels): %.80s",
             description_text,
         )
         return ""
@@ -168,6 +172,19 @@ class DataTableNotFoundError(RuntimeError):
     site layout change surfaces as a scrape failure (skips cache_meta,
     allows retry) rather than looking identical to a real empty district.
     """
+
+
+class PartialScrapeError(RuntimeError):
+    """Pagination stopped early (page 2+) because the data table couldn't
+    be found on a later page. Carries whatever rows were already collected
+    via .rows — the caller can still persist them, but should treat the
+    scrape as incomplete (e.g. skip cache_meta) rather than fully successful,
+    since further rows may exist on the page that failed to parse.
+    """
+
+    def __init__(self, rows):
+        super().__init__(f"Pagination stopped early with {len(rows)} rows collected")
+        self.rows = rows
 
 
 def parse_auction_rows(html: str, district: str, city: str = None) -> list:
@@ -276,12 +293,14 @@ def scrape_district(district: str) -> list:
         except DataTableNotFoundError:
             if page == 1:
                 raise  # no data at all — a real scrape failure, not "0 results"
-            # Already-collected pages are kept; only pagination stops here.
+            # Already-collected pages are kept, but the caller must not
+            # treat this as a fully successful scrape (e.g. for cache_meta)
+            # since later pages may hold rows that were never collected.
             logger.warning(
                 "No data table on page %d for %s; stopping with %d rows collected",
                 page, district, len(all_rows),
             )
-            break
+            raise PartialScrapeError(all_rows)
 
         all_rows.extend(rows)
 

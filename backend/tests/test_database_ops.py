@@ -98,9 +98,30 @@ def test_get_geocode_cache_maps_address_norm_to_coords():
         "floor_price": 2_000_000, "area": 20.0, "property_type": "住宅",
         "auction_count": 1, "auction_date": "2026-04-01", "auction_url": "",
     })
-    cache = get_geocode_cache()
+    cache = get_geocode_cache([
+        "台北市大安區仁愛路一段1號", "台北市大安區仁愛路二段2號",
+    ])
     assert cache["台北市大安區仁愛路一段1號"] == (25.03, 121.54)
     assert "台北市大安區仁愛路二段2號" not in cache
+
+
+def test_get_geocode_cache_scoped_to_requested_addresses():
+    # A geocoded address not included in the requested list must not come
+    # back — the cache is scoped to this batch, not the whole table.
+    upsert_property({
+        "case_number": "GEO-003", "court": "台北地院", "district": "信義區",
+        "address": "台北市信義區松仁路1號",
+        "address_norm": "台北市信義區松仁路1號",
+        "lat": 25.04, "lng": 121.57,
+        "floor_price": 3_000_000, "area": 15.0, "property_type": "住宅",
+        "auction_count": 1, "auction_date": "2026-04-01", "auction_url": "",
+    })
+    cache = get_geocode_cache(["台北市大安區仁愛路一段1號"])  # unrelated address
+    assert cache == {}
+
+
+def test_get_geocode_cache_empty_input_returns_empty_dict():
+    assert get_geocode_cache([]) == {}
 
 
 def test_get_properties_filter_by_price():

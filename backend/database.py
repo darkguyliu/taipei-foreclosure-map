@@ -2,7 +2,7 @@
 import sqlite3
 import os
 from contextlib import contextmanager
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Iterable, Tuple
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "data.db")
 
@@ -126,12 +126,19 @@ def upsert_cache_meta(district: str) -> None:
         """, (district,))
 
 
-def get_geocode_cache() -> Dict[str, tuple]:
-    """Map every already-geocoded address_norm to its (lat, lng), for a
-    single bulk lookup instead of one query per row during a refresh."""
+def get_geocode_cache(address_norms: Iterable[str]) -> Dict[str, Optional[Tuple[float, float]]]:
+    """Map each of the given address_norm values to its (lat, lng) where
+    already geocoded, via a single bulk lookup scoped to this batch instead
+    of one query per row (or loading every district's history)."""
+    distinct = list({a for a in address_norms if a})
+    if not distinct:
+        return {}
+    placeholders = ",".join("?" * len(distinct))
     with get_db() as conn:
         rows = conn.execute(
-            "SELECT address_norm, lat, lng FROM properties WHERE lat IS NOT NULL"
+            f"SELECT address_norm, lat, lng FROM properties "
+            f"WHERE lat IS NOT NULL AND address_norm IN ({placeholders})",
+            distinct,
         ).fetchall()
     return {row["address_norm"]: (row["lat"], row["lng"]) for row in rows}
 

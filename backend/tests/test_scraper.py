@@ -158,7 +158,9 @@ def test_scrape_district_unknown_district_returns_empty():
 def test_scrape_district_keeps_earlier_pages_if_a_later_page_has_no_table(monkeypatch):
     # If the live site's table disappears on page 2+ (e.g. a transient glitch
     # or an edge case this project hasn't seen), pagination should stop and
-    # return what page 1 already collected — not discard it.
+    # raise PartialScrapeError carrying what page 1 already collected — not
+    # discard it, but also not let the caller treat this as a full success
+    # (see routes.py's handling: persist .rows, but skip cache_meta).
     monkeypatch.setattr(scraper_module.requests, "Session", _FakeSession)
 
     page1_rows = [{"case_number": "P1-1"}]
@@ -172,7 +174,9 @@ def test_scrape_district_keeps_earlier_pages_if_a_later_page_has_no_table(monkey
 
     monkeypatch.setattr(scraper_module, "parse_auction_rows", _fake_parse)
 
-    assert scraper_module.scrape_district("大安區") == page1_rows
+    with pytest.raises(scraper_module.PartialScrapeError) as exc_info:
+        scraper_module.scrape_district("大安區")
+    assert exc_info.value.rows == page1_rows
 
 
 def test_scrape_district_raises_if_first_page_has_no_table(monkeypatch):
@@ -260,6 +264,24 @@ def test_address_fallback_stops_at_other_field_labels():
     # still terminate the match instead of being appended as noise.
     text = "地址/完整地號：臺北市大安區信義路三段186號5樓權利範圍：全部底價：100"
     assert _extract_address_fallback(text) == "臺北市大安區信義路三段186號5樓"
+
+
+def test_address_fallback_stops_at_additional_known_labels():
+    for label in ["坐落", "備註", "車位", "他項權利", "建號", "使用執照"]:
+        text = f"地址/完整地號：臺北市大安區信義路三段186號5樓{label}：測試底價：100"
+        assert _extract_address_fallback(text) == "臺北市大安區信義路三段186號5樓", label
+
+
+def test_address_fallback_logs_warning_on_unmatched_label(caplog):
+    # A field label not in stop_labels is a known, open-ended limitation.
+    # Use filler long enough that no stop point (comma/known label/end of
+    # string) falls within the 60-char cap, so the regex finds no match at
+    # all — that must at least be logged (at a visible level) so it can be
+    # found and added, instead of silently dropping the row with no trace.
+    text = "地址/完整地號：" + "甲" * 65 + "底價：100"
+    with caplog.at_level(logging.WARNING, logger="scraper"):
+        assert _extract_address_fallback(text) == ""
+    assert any("didn't match" in r.message for r in caplog.records)
 
 
 def test_address_fallback_keeps_trailing_号_before_a_label():

@@ -93,6 +93,81 @@ def test_refresh_rejects_unknown_district():
     assert resp.status_code == 400
 
 
+def test_refresh_rejects_recently_refreshed_district():
+    # The autouse fixture just seeded cache_meta for 大安區 via
+    # upsert_cache_meta, so last_refreshed_at is "now" — well within
+    # MIN_REFRESH_INTERVAL. Without this check, a POST /refresh triggers a
+    # real scrape plus paid geocoding calls with no limit on how often a
+    # caller can hit it.
+    resp = client.post("/api/refresh?district=大安區")
+    assert resp.status_code == 429
+
+
+def test_refresh_rejects_when_already_in_progress():
+    # A district already mid-refresh (tracked in-process, not via DB) must
+    # be rejected too — otherwise two concurrent refreshes for the same
+    # district each load their own geocode_cache snapshot and can both pay
+    # to geocode the same new address.
+    routes._refreshing.add("士林區")
+    try:
+        resp = client.post("/api/refresh?district=士林區")
+        assert resp.status_code == 429
+    finally:
+        routes._refreshing.discard("士林區")
+
+
+def test_refresh_starts_for_district_without_recent_cache_meta(monkeypatch):
+    # 信義區 has no cache_meta row from the fixture, so it isn't blocked by
+    # the recency check or the in-progress guard. scrape_district is
+    # monkeypatched so this doesn't hit the real network.
+    monkeypatch.setattr(routes, "scrape_district", lambda district: [])
+    monkeypatch.setattr(routes, "fetch_avg_prices", lambda district: [])
+
+    resp = client.post("/api/refresh?district=信義區")
+
+    assert resp.status_code == 200
+    assert resp.json() == {"status": "started", "district": "信義區"}
+    # TestClient runs BackgroundTasks synchronously, so by the time the
+    # response above is returned, _run_refresh_guarded's `finally` should
+    # have already released the in-progress guard.
+    assert "信義區" not in routes._refreshing
+
+
+def test_run_refresh_partial_scrape_persists_rows_but_skips_cache_meta(monkeypatch, caplog):
+    rows = [{
+        "case_number": "PARTIAL-001", "court": "台北地院", "district": "大安區",
+        "address": "台北市大安區仁愛路一段1號", "floor_price": 1_000_000,
+        "area": 10.0, "property_type": "住宅", "auction_count": 1,
+        "auction_date": "2026-05-01", "auction_url": "",
+    }]
+
+    def _raise_partial(district):
+        raise routes.PartialScrapeError(rows)
+
+    monkeypatch.setattr(routes, "scrape_district", _raise_partial)
+    monkeypatch.setattr(routes, "fetch_avg_prices", lambda district: [])
+    monkeypatch.setattr(routes, "GOOGLE_API_KEY", "")
+
+    cache_meta_calls = []
+    monkeypatch.setattr(
+        routes, "upsert_cache_meta", lambda district: cache_meta_calls.append(district)
+    )
+
+    with caplog.at_level(logging.WARNING, logger="routes"):
+        routes._run_refresh("大安區")
+
+    assert cache_meta_calls == []
+    assert any("Partial scrape" in record.message for record in caplog.records)
+
+    conn = database.get_connection()
+    case_numbers = {
+        row["case_number"]
+        for row in conn.execute("SELECT case_number FROM properties").fetchall()
+    }
+    conn.close()
+    assert "PARTIAL-001" in case_numbers  # still persisted despite being partial
+
+
 def test_run_refresh_does_not_raise_when_scrape_fails(monkeypatch, caplog):
     def _boom(district):
         raise RuntimeError("CAPTCHA fetch failed")
