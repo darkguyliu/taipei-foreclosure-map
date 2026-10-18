@@ -40,20 +40,26 @@ export default function App() {
 
   async function handleRefresh() {
     if (!district) return
+    const requestedDistrict = district // snapshot — the user may switch away before this resolves
     setRefreshError('')
     let resp
     try {
-      resp = await fetch(`/api/refresh?district=${encodeURIComponent(district)}`, { method: 'POST' })
+      resp = await fetch(`/api/refresh?district=${encodeURIComponent(requestedDistrict)}`, { method: 'POST' })
     } catch {
-      setRefreshError('刷新失敗，請檢查網路連線')
+      if (district === requestedDistrict) setRefreshError('刷新失敗，請檢查網路連線')
       return
     }
     if (!resp.ok) {
       // 429 (throttled) or 409 (already in progress) — don't reload, the
-      // user needs to know nothing new was triggered.
-      const retryAfter = resp.headers.get('Retry-After')
-      const message = REFRESH_STATUS_MESSAGES[resp.status] || '刷新失敗'
-      setRefreshError(retryAfter ? `${message}（請 ${retryAfter} 秒後再試）` : message)
+      // user needs to know nothing new was triggered. Only show this if
+      // they're still looking at the district it's actually about —
+      // otherwise a slow response for a district they've since left
+      // would show up as an error on whatever they switched to instead.
+      if (district === requestedDistrict) {
+        const retryAfter = resp.headers.get('Retry-After')
+        const message = REFRESH_STATUS_MESSAGES[resp.status] || '刷新失敗'
+        setRefreshError(retryAfter ? `${message}（請 ${retryAfter} 秒後再試）` : message)
+      }
       return
     }
     // Reload after a short delay to allow background task to complete

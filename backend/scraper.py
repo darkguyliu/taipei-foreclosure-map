@@ -12,6 +12,17 @@ from property_type_mapper import normalize_property_type
 logger = logging.getLogger(__name__)
 
 BASE_URL = "https://www.tpkonsale.moj.gov.tw"
+
+# Pagination runaway guard. Deliberately generous relative to any real
+# district's observed listing count (low dozens; a full page is ~10-11
+# rows) specifically so hitting it is a clear anomaly rather than a
+# normal "big district" — a tighter cap means a district that happens
+# to have exactly that many pages would raise PartialScrapeError (and
+# so never advance cache_meta) on every single refresh, forever, since
+# the result is legitimately complete but indistinguishable from "there
+# might be more" without this margin.
+PAGE_CAP = 50
+
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -311,13 +322,13 @@ def scrape_district(district: str) -> list:
         if not rows:
             break
         page += 1
-        if page > 20:
-            # Safety cap — there may well be more pages past this one, so
-            # treat it the same as a page breaking mid-pagination: the
-            # caller shouldn't mark this district as fully refreshed.
+        if page > PAGE_CAP:
+            # There may well be more pages past this one, so treat it the
+            # same as a page breaking mid-pagination: the caller shouldn't
+            # mark this district as fully refreshed.
             logger.warning(
-                "Hit the 20-page safety cap for %s with %d rows collected",
-                district, len(all_rows),
+                "Hit the %d-page safety cap for %s with %d rows collected",
+                PAGE_CAP, district, len(all_rows),
             )
             raise PartialScrapeError(all_rows)
 

@@ -215,7 +215,7 @@ def test_scrape_district_raises_if_first_page_has_no_table(monkeypatch):
 
 
 def test_scrape_district_treats_page_cap_as_partial(monkeypatch):
-    # Hitting the 20-page safety cap means there may well be more pages
+    # Hitting the page-count safety cap means there may well be more pages
     # left unread — that's incomplete, not a confirmed full result, so it
     # must raise PartialScrapeError just like a mid-pagination table miss
     # does, rather than silently returning as if nothing were missed.
@@ -227,7 +227,28 @@ def test_scrape_district_treats_page_cap_as_partial(monkeypatch):
 
     with pytest.raises(scraper_module.PartialScrapeError) as exc_info:
         scraper_module.scrape_district("大安區")
-    assert len(exc_info.value.rows) == 20
+    assert len(exc_info.value.rows) == scraper_module.PAGE_CAP
+
+
+def test_scrape_district_does_not_treat_a_legitimately_complete_district_as_partial(monkeypatch):
+    # A district whose true page count happens to land exactly on the cap
+    # boundary must not be permanently misjudged as partial — the cap is
+    # set generously above any real district's observed listing count
+    # specifically so this (an empty page right after a full one, within
+    # the cap) is what real complete results look like.
+    monkeypatch.setattr(scraper_module.requests, "Session", _FakeSession)
+    calls = {"n": 0}
+
+    def _fake_parse(html, district, city=None):
+        calls["n"] += 1
+        # One row per page up to (but not including) the cap, then empty —
+        # a normal "ran out of results" ending well inside the margin.
+        return [{"case_number": f"P{calls['n']}"}] if calls["n"] <= scraper_module.PAGE_CAP - 1 else []
+
+    monkeypatch.setattr(scraper_module, "parse_auction_rows", _fake_parse)
+
+    rows = scraper_module.scrape_district("大安區")  # must not raise
+    assert len(rows) == scraper_module.PAGE_CAP - 1
 
 
 NO_MAPS_LINK_HTML = """

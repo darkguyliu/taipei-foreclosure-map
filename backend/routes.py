@@ -41,6 +41,13 @@ _last_attempt: Dict[str, float] = {}
 # satisfies the 5-minute gap, but the site still gets hit and the paid
 # Geocoding API still gets called continuously. This caps the rate across
 # *all* districts combined, independent of which one is being refreshed.
+#
+# This is shared across every caller with no per-user/per-IP accounting —
+# fine for this app's actual single-user/trusted-access deployment, but
+# if it's ever exposed publicly, one anonymous caller hitting this every
+# 20s would starve everyone else's refreshes. Would need per-IP or
+# per-API-key throttling (and likely auth on the endpoint generally) at
+# that point, not just this global one.
 GLOBAL_MIN_INTERVAL_SECONDS = 20
 _last_global_attempt: Optional[float] = None
 
