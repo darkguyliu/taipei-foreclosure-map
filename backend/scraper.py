@@ -307,8 +307,15 @@ def scrape_district(district: str) -> list:
         if not rows:
             break
         page += 1
-        if page > 20:  # safety cap
-            break
+        if page > 20:
+            # Safety cap — there may well be more pages past this one, so
+            # treat it the same as a page breaking mid-pagination: the
+            # caller shouldn't mark this district as fully refreshed.
+            logger.warning(
+                "Hit the 20-page safety cap for %s with %d rows collected",
+                district, len(all_rows),
+            )
+            raise PartialScrapeError(all_rows)
 
     logger.info("Scraped %d rows for %s", len(all_rows), district)
     return all_rows

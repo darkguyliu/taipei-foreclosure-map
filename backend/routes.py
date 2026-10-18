@@ -2,7 +2,8 @@
 import logging
 import os
 import threading
-from datetime import datetime, timedelta
+import time
+from typing import Dict
 from fastapi import APIRouter, HTTPException, BackgroundTasks
 from database import (
     get_properties, get_avg_prices, get_cache_meta,
@@ -28,17 +29,28 @@ GOOGLE_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY", "")
 # guards a single uvicorn worker, which matches how this app is run (see
 # .claude/launch.json — no --workers flag). A multi-worker deployment
 # would need a DB-backed lock instead.
-MIN_REFRESH_INTERVAL = timedelta(minutes=5)
-_last_attempt: dict = {}
+#
+# time.monotonic() rather than datetime.now(): this is purely interval
+# math (has N seconds passed), and monotonic time can't jump backwards or
+# forwards from a wall-clock adjustment (NTP sync, DST, manual change).
+MIN_REFRESH_INTERVAL_SECONDS = 5 * 60
+_last_attempt: Dict[str, float] = {}
 
-# Districts with a refresh currently running as a BackgroundTask. Guards
-# against two concurrent refreshes of the *same* district each loading
-# their own geocode_cache snapshot and re-geocoding (and re-paying for)
-# the same new addresses. Guarded by the same lock as _last_attempt so the
-# recency check and the in-progress check are one atomic step — otherwise
-# two requests arriving close together could both pass the recency check
-# before either one takes the in-progress flag.
-_refreshing: set = set()
+# Districts with a refresh currently running as a BackgroundTask, mapped
+# to when they started. Guards against two concurrent refreshes of the
+# *same* district each loading their own geocode_cache snapshot and
+# re-geocoding (and re-paying for) the same new addresses. An entry older
+# than MAX_REFRESH_DURATION_SECONDS is treated as stale rather than still
+# "in progress" — if the BackgroundTask never actually ran (e.g. the
+# process was killed between accepting the request and running it), the
+# district would otherwise be stuck rejecting every refresh until restart.
+#
+# Guarded by the same lock as _last_attempt so the recency check and the
+# in-progress check are one atomic step — otherwise two requests arriving
+# close together could both pass the recency check before either one
+# takes the in-progress flag.
+MAX_REFRESH_DURATION_SECONDS = 30 * 60
+_refreshing: Dict[str, float] = {}
 _refresh_lock = threading.Lock()
 
 
@@ -83,14 +95,29 @@ def refresh(district: str, background_tasks: BackgroundTasks):
     if not get_city_for_district(district):
         raise HTTPException(status_code=400, detail="Unknown district")
 
+    now = time.monotonic()
     with _refresh_lock:
         last_attempt = _last_attempt.get(district)
-        if last_attempt and datetime.now() - last_attempt < MIN_REFRESH_INTERVAL:
-            raise HTTPException(status_code=429, detail="Refreshed too recently, try again later")
-        if district in _refreshing:
-            raise HTTPException(status_code=429, detail="Refresh already in progress for this district")
-        _refreshing.add(district)
-        _last_attempt[district] = datetime.now()
+        if last_attempt is not None:
+            elapsed = now - last_attempt
+            if elapsed < MIN_REFRESH_INTERVAL_SECONDS:
+                retry_after = int(MIN_REFRESH_INTERVAL_SECONDS - elapsed) + 1
+                raise HTTPException(
+                    status_code=429,
+                    detail="Refreshed too recently, try again later",
+                    headers={"Retry-After": str(retry_after)},
+                )
+
+        started_at = _refreshing.get(district)
+        if started_at is not None and now - started_at < MAX_REFRESH_DURATION_SECONDS:
+            raise HTTPException(
+                status_code=429,
+                detail="Refresh already in progress for this district",
+                headers={"Retry-After": "60"},
+            )
+
+        _refreshing[district] = now
+        _last_attempt[district] = now
 
     background_tasks.add_task(_run_refresh_guarded, district)
     return {"status": "started", "district": district}
@@ -101,7 +128,7 @@ def _run_refresh_guarded(district: str) -> None:
         _run_refresh(district)
     finally:
         with _refresh_lock:
-            _refreshing.discard(district)
+            _refreshing.pop(district, None)
 
 
 def _run_refresh(district: str) -> None:

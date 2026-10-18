@@ -192,6 +192,22 @@ def test_scrape_district_raises_if_first_page_has_no_table(monkeypatch):
         scraper_module.scrape_district("大安區")
 
 
+def test_scrape_district_treats_page_cap_as_partial(monkeypatch):
+    # Hitting the 20-page safety cap means there may well be more pages
+    # left unread — that's incomplete, not a confirmed full result, so it
+    # must raise PartialScrapeError just like a mid-pagination table miss
+    # does, rather than silently returning as if nothing were missed.
+    monkeypatch.setattr(scraper_module.requests, "Session", _FakeSession)
+    monkeypatch.setattr(
+        scraper_module, "parse_auction_rows",
+        lambda html, district, city=None: [{"case_number": "X"}],  # always another row
+    )
+
+    with pytest.raises(scraper_module.PartialScrapeError) as exc_info:
+        scraper_module.scrape_district("大安區")
+    assert len(exc_info.value.rows) == 20
+
+
 NO_MAPS_LINK_HTML = """
 <table>
   <tr>

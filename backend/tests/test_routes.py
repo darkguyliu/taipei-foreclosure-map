@@ -1,7 +1,7 @@
 # backend/tests/test_routes.py
 import logging
 import sqlite3
-from datetime import datetime
+import time
 import pytest
 from fastapi.testclient import TestClient
 import database
@@ -102,9 +102,10 @@ def test_refresh_rejects_unknown_district():
 def test_refresh_rejects_recently_refreshed_district():
     # Without this check, a POST /refresh triggers a real scrape plus paid
     # geocoding calls with no limit on how often a caller can hit it.
-    routes._last_attempt["大安區"] = datetime.now()
+    routes._last_attempt["大安區"] = time.monotonic()
     resp = client.post("/api/refresh?district=大安區")
     assert resp.status_code == 429
+    assert "Retry-After" in resp.headers
 
 
 def test_refresh_throttles_even_after_a_failed_attempt(monkeypatch):
@@ -129,12 +130,27 @@ def test_refresh_rejects_when_already_in_progress():
     # be rejected too — otherwise two concurrent refreshes for the same
     # district each load their own geocode_cache snapshot and can both pay
     # to geocode the same new address.
-    routes._refreshing.add("士林區")
+    routes._refreshing["士林區"] = time.monotonic()
     try:
         resp = client.post("/api/refresh?district=士林區")
         assert resp.status_code == 429
+        assert "Retry-After" in resp.headers
     finally:
-        routes._refreshing.discard("士林區")
+        routes._refreshing.pop("士林區", None)
+
+
+def test_refresh_allows_retry_once_in_progress_entry_is_stale(monkeypatch):
+    # An entry older than MAX_REFRESH_DURATION_SECONDS means the previous
+    # BackgroundTask likely never actually ran (e.g. the process died
+    # between accepting the request and running it) — it must not block
+    # this district forever.
+    monkeypatch.setattr(routes, "scrape_district", lambda district: [])
+    monkeypatch.setattr(routes, "fetch_avg_prices", lambda district: [])
+
+    routes._refreshing["北投區"] = time.monotonic() - routes.MAX_REFRESH_DURATION_SECONDS - 1
+
+    resp = client.post("/api/refresh?district=北投區")
+    assert resp.status_code == 200
 
 
 def test_refresh_starts_for_district_without_recent_cache_meta(monkeypatch):
