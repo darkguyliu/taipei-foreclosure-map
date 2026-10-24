@@ -144,12 +144,13 @@ def get_geocode_cache(address_norms: Iterable[Optional[str]]) -> Dict[str, Tuple
             placeholders = ",".join("?" * len(chunk))
             # ORDER BY + dict construction below: if an address_norm has
             # multiple rows with different coordinates, the most recently
-            # updated one wins deterministically, rather than whichever
-            # SQLite happens to return last.
+            # updated one wins deterministically. updated_at alone only
+            # has second resolution, so id breaks ties within the same
+            # second (higher id = inserted/updated later).
             rows = conn.execute(
                 f"SELECT address_norm, lat, lng FROM properties "
                 f"WHERE lat IS NOT NULL AND address_norm IN ({placeholders}) "
-                f"ORDER BY updated_at ASC",
+                f"ORDER BY updated_at ASC, id ASC",
                 chunk,
             ).fetchall()
             cache.update((row["address_norm"], (row["lat"], row["lng"])) for row in rows)

@@ -175,6 +175,36 @@ def test_get_geocode_cache_prefers_most_recently_updated_coords():
     assert cache[addr] == (25.02, 121.02)
 
 
+def test_get_geocode_cache_breaks_same_second_tie_by_id():
+    # updated_at only has second resolution, so two rows written within
+    # the same wall-clock second would otherwise sort in whatever order
+    # SQLite happens to return them. id (insertion order) must break the
+    # tie deterministically — the higher id (written later) wins.
+    addr = "台北市大安區同秒路1號"
+    upsert_property({
+        "case_number": "TIE-OLD", "court": "台北地院", "district": "大安區",
+        "address": addr, "address_norm": addr,
+        "lat": 25.11, "lng": 121.11,
+        "floor_price": 1_000_000, "area": 10.0, "property_type": "住宅",
+        "auction_count": 1, "auction_date": "2026-04-01", "auction_url": "",
+    })
+    upsert_property({
+        "case_number": "TIE-NEW", "court": "台北地院", "district": "大安區",
+        "address": addr, "address_norm": addr,
+        "lat": 25.12, "lng": 121.12,
+        "floor_price": 1_000_000, "area": 10.0, "property_type": "住宅",
+        "auction_count": 1, "auction_date": "2026-04-01", "auction_url": "",
+    })
+    # Pin both rows to the exact same updated_at so only id can break the tie.
+    conn = get_connection()
+    conn.execute("UPDATE properties SET updated_at = '2020-01-01 00:00:00' WHERE address_norm = ?", (addr,))
+    conn.commit()
+    conn.close()
+
+    cache = get_geocode_cache([addr])
+    assert cache[addr] == (25.12, 121.12)
+
+
 def test_get_properties_filter_by_price():
     for i, price in enumerate([3_000_000, 8_000_000, 15_000_000]):
         upsert_property({

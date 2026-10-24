@@ -172,6 +172,39 @@ def test_refresh_rejects_when_already_in_progress():
         routes._refreshing.pop("士林區", None)
 
 
+def test_refresh_rejects_when_concurrency_cap_reached():
+    # Each in-progress refresh occupies a BackgroundTask thread for up to
+    # MAX_REFRESH_DURATION_SECONDS. Enough distinct districts requested at
+    # once (each individually clears its own per-district/global throttle)
+    # must still be capped, or they can exhaust the threadpool.
+    now = time.monotonic()
+    districts = ["內湖區", "士林區", "北投區"]
+    assert len(districts) == routes.MAX_CONCURRENT_REFRESHES
+    for d in districts:
+        routes._refreshing[d] = now
+    try:
+        resp = client.post("/api/refresh?district=信義區")
+        assert resp.status_code == 503
+    finally:
+        for d in districts:
+            routes._refreshing.pop(d, None)
+
+
+def test_refresh_concurrency_cap_ignores_stale_entries(monkeypatch):
+    # A stale entry (its BackgroundTask never actually ran, or finished
+    # long ago without cleaning up) isn't holding a thread — it must not
+    # count against the cap.
+    monkeypatch.setattr(routes, "scrape_district", lambda district: [])
+    monkeypatch.setattr(routes, "fetch_avg_prices", lambda district: [])
+
+    stale = time.monotonic() - routes.MAX_REFRESH_DURATION_SECONDS - 1
+    for d in ["內湖區", "士林區", "北投區"]:
+        routes._refreshing[d] = stale
+
+    resp = client.post("/api/refresh?district=信義區")
+    assert resp.status_code == 200
+
+
 def test_refresh_allows_retry_once_in_progress_entry_is_stale(monkeypatch):
     # An entry older than MAX_REFRESH_DURATION_SECONDS means the
     # BackgroundTask likely never actually ran within this process — it

@@ -205,6 +205,96 @@ class _FlakyQuerySession(_FakeSession):
         return super().get(url, **kwargs)
 
 
+_NO_ADDRESS_ROW_HTML = """
+<table>
+  <tr>
+    <th>No</th><th>案號</th><th>拍賣日時</th><th>拍賣註記</th>
+    <th>是否點交</th><th>拍定日期</th><th>說明</th><th>環景圖</th><th>污染</th>
+  </tr>
+  <tr>
+    <td>1</td>
+    <td>1060100008317(台北分署／申股)</td>
+    <td>2021/11/02 15:00:00第三拍</td>
+    <td></td>
+    <td>Y</td>
+    <td>110/11/0244,129,999</td>
+    <td>一、公告拍賣房屋 底價：37,700,000面積：39.51坪</td>
+    <td></td>
+    <td>查詢</td>
+  </tr>
+</table>
+"""
+
+_ONE_VALID_ROW_HTML = """
+<table>
+  <tr>
+    <th>No</th><th>案號</th><th>拍賣日時</th><th>拍賣註記</th>
+    <th>是否點交</th><th>拍定日期</th><th>說明</th><th>環景圖</th><th>污染</th>
+  </tr>
+  <tr>
+    <td>1</td>
+    <td>1070100000001(台北分署／甲股)</td>
+    <td>2022/01/01 10:00:00第一拍</td>
+    <td></td>
+    <td>Y</td>
+    <td></td>
+    <td>
+      地址/完整地號：臺北市大安區仁愛路一段1號
+      底價：10,000,000面積：20.00坪
+    </td>
+    <td></td>
+    <td>查詢</td>
+  </tr>
+</table>
+"""
+
+_EMPTY_TABLE_HTML = """
+<table>
+  <tr>
+    <th>No</th><th>案號</th><th>拍賣日時</th><th>拍賣註記</th>
+    <th>是否點交</th><th>拍定日期</th><th>說明</th><th>環景圖</th><th>污染</th>
+  </tr>
+</table>
+"""
+
+
+class _ScriptedQuerySession(_FakeSession):
+    """Returns a different, real HTML page per Estate/Query call, in
+    order, for exercising the full real parse_auction_rows pipeline
+    (not mocked) across several distinct pages."""
+
+    def __init__(self, pages):
+        super().__init__()
+        self._pages = list(pages)
+        self._query_calls = 0
+
+    def get(self, url, **kwargs):
+        if "Estate/Query" in url:
+            html = self._pages[self._query_calls]
+            self._query_calls += 1
+            return _FakeResp(text=html)
+        return super().get(url, **kwargs)
+
+
+def test_scrape_district_does_not_stop_on_a_page_with_rows_but_no_addresses(monkeypatch):
+    # A page can have real <tr> candidates that all fail to yield an
+    # address (e.g. a layout quirk on just that page) without that being
+    # "the end of results" — _raw_row_count distinguishes this from a
+    # genuinely empty table so pagination doesn't silently stop short of
+    # real further pages. Uses the real parse_auction_rows (not mocked)
+    # against crafted HTML so the fix is exercised end-to-end, not just
+    # at the mocked-return-value level.
+    monkeypatch.setattr(
+        scraper_module.requests, "Session",
+        lambda: _ScriptedQuerySession([_NO_ADDRESS_ROW_HTML, _ONE_VALID_ROW_HTML, _EMPTY_TABLE_HTML]),
+    )
+
+    rows = scraper_module.scrape_district("大安區")  # must not raise or stop early
+
+    assert len(rows) == 1
+    assert rows[0]["case_number"] == "1070100000001"
+
+
 def test_scrape_district_treats_any_later_page_failure_as_partial(monkeypatch):
     # Not just DataTableNotFoundError — a network-level failure on page 2+
     # must also preserve earlier pages instead of discarding them as a

@@ -180,6 +180,21 @@ def _find_data_table(tables):
     return None
 
 
+def _raw_row_count(html: str) -> int:
+    """How many <tr> candidates (>=7 <td>s, the same minimum
+    parse_auction_rows itself requires) exist in the results table,
+    before any address/field-level filtering. Used by scrape_district to
+    tell "this page genuinely has no more rows" apart from "this page had
+    rows, but every one of them failed to parse (e.g. no address found)"
+    — the latter must not be treated as the end of pagination, or a page
+    with real further pages behind it gets silently truncated."""
+    soup = BeautifulSoup(html, "html.parser")
+    data_table = _find_data_table(soup.find_all("table"))
+    if data_table is None:
+        return 0
+    return sum(1 for tr in data_table.find_all("tr") if len(tr.find_all("td")) >= 7)
+
+
 class DataTableNotFoundError(RuntimeError):
     """The results table couldn't be located in the page at all — distinct
     from a found table with zero matching rows, which is a legitimate
@@ -354,7 +369,17 @@ def scrape_district(district: str) -> list:
         all_rows.extend(rows)
 
         if not rows:
-            break
+            if _raw_row_count(resp.text) == 0:
+                break  # genuinely no more data
+            # The page had real rows, but none of them parsed (most
+            # likely no address could be extracted from any of them) —
+            # that's a data-quality problem, not "end of results", so
+            # pagination keeps going rather than silently truncating
+            # whatever real further pages exist.
+            logger.warning(
+                "Page %d for %s had rows but none parsed; continuing pagination",
+                page, district,
+            )
         page += 1
         if page > PAGE_CAP:
             logger.warning(

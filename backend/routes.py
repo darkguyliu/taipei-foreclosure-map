@@ -50,6 +50,13 @@ MAX_REFRESH_DURATION_SECONDS = 60 * 60
 _refreshing: Dict[str, float] = {}
 _refresh_lock = threading.Lock()
 
+# Each in-progress refresh occupies a BackgroundTask thread for up to
+# MAX_REFRESH_DURATION_SECONDS. Without a cap, enough distinct districts
+# requested at once (each passes its own per-district/global throttle)
+# could exhaust the threadpool. Stale entries (see _refreshing above)
+# don't count against this — they're not actually holding a thread.
+MAX_CONCURRENT_REFRESHES = 3
+
 
 @router.get("/properties")
 def list_properties(
@@ -120,6 +127,16 @@ def refresh(district: str, background_tasks: BackgroundTasks):
             logger.warning(
                 "Stale in-progress entry for %s (%.0fs old); taking it over",
                 district, now - started_at,
+            )
+
+        active_refreshes = sum(
+            1 for other_started_at in _refreshing.values()
+            if now - other_started_at < MAX_REFRESH_DURATION_SECONDS
+        )
+        if active_refreshes >= MAX_CONCURRENT_REFRESHES:
+            raise HTTPException(
+                status_code=503,
+                detail="Too many refreshes in progress, try again shortly",
             )
 
         last_attempt = _last_attempt.get(district)
