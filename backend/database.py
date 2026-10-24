@@ -89,7 +89,7 @@ def upsert_property(prop: Dict) -> None:
                 (:case_number, :court, :district, :address, :address_norm,
                  :lat, :lng, :floor_price, :area, :property_type,
                  :auction_count, :auction_date, :auction_url,
-                 datetime('now', 'localtime'))
+                 strftime('%Y-%m-%d %H:%M:%f', 'now', 'localtime'))
             ON CONFLICT(case_number) DO UPDATE SET
                 court=excluded.court,
                 address=excluded.address,
@@ -144,13 +144,15 @@ def get_geocode_cache(address_norms: Iterable[Optional[str]]) -> Dict[str, Tuple
             placeholders = ",".join("?" * len(chunk))
             # ORDER BY + dict construction below: if an address_norm has
             # multiple rows with different coordinates, the most recently
-            # updated one wins deterministically. updated_at alone only
-            # has second resolution, so id breaks ties within the same
-            # second (higher id = inserted/updated later).
+            # updated one wins deterministically. updated_at is written
+            # with millisecond precision (see upsert_property) specifically
+            # so two rows can't tie here — id can't substitute as a
+            # tiebreaker since ON CONFLICT DO UPDATE leaves a row's id
+            # unchanged, so it doesn't track write recency.
             rows = conn.execute(
                 f"SELECT address_norm, lat, lng FROM properties "
                 f"WHERE lat IS NOT NULL AND address_norm IN ({placeholders}) "
-                f"ORDER BY updated_at ASC, id ASC",
+                f"ORDER BY updated_at ASC",
                 chunk,
             ).fetchall()
             cache.update((row["address_norm"], (row["lat"], row["lng"])) for row in rows)
