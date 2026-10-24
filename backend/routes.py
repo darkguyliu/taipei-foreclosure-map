@@ -1,13 +1,16 @@
 # backend/routes.py
 import logging
 import os
+import threading
+import time
+from typing import Dict, Optional
 from fastapi import APIRouter, HTTPException, BackgroundTasks
 from database import (
     get_properties, get_avg_prices, get_cache_meta,
     get_property_by_id, upsert_property, upsert_avg_price,
     upsert_cache_meta, get_geocode_cache,
 )
-from scraper import scrape_district
+from scraper import scrape_district, PartialScrapeError
 from geocoder import normalize_address, geocode_address
 from realtime_prices import fetch_avg_prices
 from cities import get_city_for_district
@@ -16,6 +19,43 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api")
 
 GOOGLE_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY", "")
+
+# Per-district refresh cooldown. Keyed off this dict rather than
+# cache_meta.last_refreshed_at, which only updates on success — a
+# district that keeps failing to scrape would otherwise never be
+# throttled. time.monotonic() because this is pure interval math, immune
+# to wall-clock jumps. Process-local: matches running this app as a
+# single uvicorn worker (see .claude/launch.json); a multi-worker
+# deployment would need a DB-backed lock instead.
+MIN_REFRESH_INTERVAL_SECONDS = 5 * 60
+_last_attempt: Dict[str, float] = {}
+
+# Caps the rate across *all* districts combined, so a caller can't bypass
+# the per-district cooldown by just cycling through every district. No
+# per-user/per-IP accounting — fine for trusted/single-user access; would
+# need that (and likely auth) before exposing this publicly.
+GLOBAL_MIN_INTERVAL_SECONDS = 20
+_last_global_attempt: Optional[float] = None
+
+# Districts with a refresh currently running, mapped to when they
+# started — guards against two concurrent refreshes of the same district
+# double-paying to geocode the same new address. An entry older than
+# MAX_REFRESH_DURATION_SECONDS is stale (the BackgroundTask never ran in
+# this process) rather than still in progress. Guarded by the same lock
+# as _last_attempt so the recency and in-progress checks are one atomic
+# step. The duration is set above the worst-case scrape time (PAGE_CAP
+# pages * ~35s each, before geocoding) so a merely slow scrape isn't
+# mistaken for a stuck one.
+MAX_REFRESH_DURATION_SECONDS = 60 * 60
+_refreshing: Dict[str, float] = {}
+_refresh_lock = threading.Lock()
+
+# Each in-progress refresh occupies a BackgroundTask thread for up to
+# MAX_REFRESH_DURATION_SECONDS. Without a cap, enough distinct districts
+# requested at once (each passes its own per-district/global throttle)
+# could exhaust the threadpool. Stale entries (see _refreshing above)
+# don't count against this — they're not actually holding a thread.
+MAX_CONCURRENT_REFRESHES = 3
 
 
 @router.get("/properties")
@@ -58,8 +98,88 @@ def refresh(district: str, background_tasks: BackgroundTasks):
     # through to upsert_cache_meta).
     if not get_city_for_district(district):
         raise HTTPException(status_code=400, detail="Unknown district")
-    background_tasks.add_task(_run_refresh, district)
+
+    global _last_global_attempt
+    now = time.monotonic()
+    with _refresh_lock:
+        # Checked in order of specificity: is *this* refresh already
+        # running (409) before asking whether it's just been refreshed
+        # too recently (429) — otherwise the recency check (a full 5
+        # minutes) masks the in-progress state for nearly all of a scrape's
+        # actual duration, and callers only ever see 409 in the rare case
+        # the scrape runs past 5 minutes.
+        started_at = _refreshing.get(district)
+        if started_at is not None:
+            if now - started_at < MAX_REFRESH_DURATION_SECONDS:
+                # No Retry-After here: we genuinely don't know how much
+                # longer the in-flight refresh has left, and a made-up
+                # number (e.g. a flat 60s) would just mislead the caller
+                # into waiting the wrong amount of time.
+                raise HTTPException(
+                    status_code=409,
+                    detail="Refresh already in progress for this district",
+                )
+            # Stale — the previous refresh's entry is being taken over by
+            # this request. Logged because it means either a genuinely
+            # slow scrape just got raced by a concurrent duplicate, or the
+            # prior BackgroundTask never ran at all; worth being able to
+            # tell which happened after the fact.
+            logger.warning(
+                "Stale in-progress entry for %s (%.0fs old); taking it over",
+                district, now - started_at,
+            )
+
+        active_refreshes = sum(
+            1 for other_started_at in _refreshing.values()
+            if now - other_started_at < MAX_REFRESH_DURATION_SECONDS
+        )
+        if active_refreshes >= MAX_CONCURRENT_REFRESHES:
+            raise HTTPException(
+                status_code=503,
+                detail="Too many refreshes in progress, try again shortly",
+            )
+
+        last_attempt = _last_attempt.get(district)
+        if last_attempt is not None:
+            elapsed = now - last_attempt
+            if elapsed < MIN_REFRESH_INTERVAL_SECONDS:
+                retry_after = int(MIN_REFRESH_INTERVAL_SECONDS - elapsed) + 1
+                raise HTTPException(
+                    status_code=429,
+                    detail="Refreshed too recently, try again later",
+                    headers={"Retry-After": str(retry_after)},
+                )
+
+        if _last_global_attempt is not None:
+            elapsed = now - _last_global_attempt
+            if elapsed < GLOBAL_MIN_INTERVAL_SECONDS:
+                retry_after = int(GLOBAL_MIN_INTERVAL_SECONDS - elapsed) + 1
+                raise HTTPException(
+                    status_code=429,
+                    detail="Too many refresh requests, try again shortly",
+                    headers={"Retry-After": str(retry_after)},
+                )
+
+        _refreshing[district] = now
+        _last_attempt[district] = now
+        _last_global_attempt = now
+
+    background_tasks.add_task(_run_refresh_guarded, district, now)
     return {"status": "started", "district": district}
+
+
+def _run_refresh_guarded(district: str, started_at: float) -> None:
+    try:
+        _run_refresh(district)
+    finally:
+        with _refresh_lock:
+            # Only clear the entry this call itself created. If it went
+            # stale (ran past MAX_REFRESH_DURATION_SECONDS) and a newer
+            # request already took the slot, that slot belongs to the new
+            # request now — blindly popping here would delete it and let
+            # a third request start concurrently with the second.
+            if _refreshing.get(district) == started_at:
+                _refreshing.pop(district, None)
 
 
 def _run_refresh(district: str) -> None:
@@ -68,9 +188,20 @@ def _run_refresh(district: str) -> None:
     logger.info("Starting refresh for %s", district)
 
     # 1. Scrape. A total failure here (CAPTCHA/network) means there's nothing
-    # to persist, so abort without touching cache_meta.
+    # to persist, so abort without touching cache_meta. A PartialScrapeError
+    # still carries whatever rows were collected before pagination broke —
+    # those get persisted below, but cache_meta is skipped (see step 4)
+    # since later pages may hold rows this refresh never saw.
+    partial = False
     try:
         rows = scrape_district(district)
+    except PartialScrapeError as exc:
+        rows = exc.rows
+        partial = True
+        logger.warning(
+            "Partial scrape for %s (%d rows collected); cache_meta will not be updated",
+            district, len(rows),
+        )
     except Exception:
         logger.exception("Scrape failed for %s; refresh aborted", district)
         return
@@ -78,11 +209,34 @@ def _run_refresh(district: str) -> None:
     # 2. Geocode + normalize + persist, one row at a time so a single bad
     # row (e.g. a geocoding/DB error) doesn't abort the whole batch and
     # leave avg prices and cache_meta stale relative to what did persist.
-    geocode_cache = get_geocode_cache()
-    geocoded_new = geocoded_cached = failed = errored = 0
+    # Addresses are pre-normalized so the geocode cache lookup below can be
+    # scoped to just this batch instead of loading every district's history.
+    address_norms = []
     for row in rows:
         try:
-            addr_norm = normalize_address(row["address"])
+            address_norms.append(normalize_address(row["address"]))
+        except Exception:
+            logger.warning(
+                "Failed to normalize address %r for %s",
+                row.get("address"), district, exc_info=True,
+            )
+            address_norms.append(None)
+
+    try:
+        geocode_cache = get_geocode_cache(address_norms)
+    except Exception:
+        logger.exception(
+            "Failed to load geocode cache for %s; proceeding without it", district,
+        )
+        geocode_cache = {}
+    geocoded_new = geocoded_cached = failed = errored = 0
+    for row, addr_norm in zip(rows, address_norms):
+        if addr_norm is None:
+            # Already logged with its traceback above, when normalization
+            # itself failed — nothing more to add by logging it again here.
+            errored += 1
+            continue
+        try:
             row["address_norm"] = addr_norm
 
             if addr_norm in geocode_cache:
@@ -125,13 +279,16 @@ def _run_refresh(district: str) -> None:
     except Exception:
         logger.exception("Failed to update avg prices for %s", district)
 
-    # 4. Update cache meta — but not if every single row raised while being
-    # processed (e.g. DB locked), which would otherwise mark the district
-    # as freshly updated and block retries until the TTL expires, even
-    # though nothing was actually persisted. A geocoding failure alone
-    # doesn't hit this path — it's counted in `failed` and the row still
-    # persists with lat/lng left null.
-    if not rows or errored < len(rows):
+    # 4. Update cache meta — but not if the scrape was only partial (some
+    # later page may hold rows this refresh never saw), nor if every single
+    # row raised while being processed (e.g. DB locked). Either case would
+    # otherwise mark the district as freshly updated and block retries
+    # until the TTL expires, even though the refresh didn't fully succeed.
+    # A geocoding failure alone doesn't hit the "all rows failed" path —
+    # it's counted in `failed` and the row still persists with lat/lng null.
+    if partial:
+        pass  # already logged where PartialScrapeError was caught, above
+    elif not rows or errored < len(rows):
         upsert_cache_meta(district)
     else:
         logger.error(

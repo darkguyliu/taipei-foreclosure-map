@@ -4,6 +4,7 @@ Uses GET /Estate/Query with CAPTCHA (code returned in API response).
 """
 import logging
 import re
+import time
 import requests
 from bs4 import BeautifulSoup
 from cities import get_city_for_district, get_county_code, get_area_code, KNOWN_CITY_PREFIXES
@@ -12,6 +13,20 @@ from property_type_mapper import normalize_property_type
 logger = logging.getLogger(__name__)
 
 BASE_URL = "https://www.tpkonsale.moj.gov.tw"
+
+# Pagination runaway guard, deliberately generous relative to any real
+# district's observed listing count (low dozens; a full page is ~10-11
+# rows) so hitting it is a clear anomaly, not a normal "big district".
+# A district with exactly this many true pages is still misjudged as
+# partial (no finite cap can avoid that short of removing it entirely),
+# but that's implausible given real listing counts.
+PAGE_CAP = 51
+
+# Pause between page requests so a large (capped) scrape doesn't fire up
+# to ~100 rapid, unpaced requests (CAPTCHA + query per page) at the live
+# site, which risks tripping its own rate limiting or anti-bot measures.
+PAGE_REQUEST_DELAY_SECONDS = 0.5
+
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -86,14 +101,18 @@ def _extract_address_fallback(description_text: str) -> str:
     then ：" pattern — the address's own trailing 號 can fuse with the
     next label's first characters into something that looks like one.
     """
-    stop_labels = "底價|面積|權利範圍|用途|使用分區|建物|持分|使用現況|點交|稅捐"
+    stop_labels = (
+        "底價|面積|權利範圍|用途|使用分區|建物|持分|使用現況|點交|稅捐"
+        "|坐落|備註|車位|他項權利|建號|使用執照"
+    )
     m = re.search(
         rf"地址/完整地號[：:]\s*([^，,。]{{1,60}}?)(?=[，,。]|(?:{stop_labels})[：:]|$)",
         description_text,
     )
     if not m:
-        logger.debug(
-            "Address fallback didn't match (no known field label after it?): %.80s",
+        logger.warning(
+            "Address fallback didn't match (no known field label after it?"
+            " — may need to add a label to stop_labels): %.80s",
             description_text,
         )
         return ""
@@ -161,6 +180,21 @@ def _find_data_table(tables):
     return None
 
 
+def _raw_row_count(html: str) -> int:
+    """How many <tr> candidates (>=7 <td>s, the same minimum
+    parse_auction_rows itself requires) exist in the results table,
+    before any address/field-level filtering. Used by scrape_district to
+    tell "this page genuinely has no more rows" apart from "this page had
+    rows, but every one of them failed to parse (e.g. no address found)"
+    — the latter must not be treated as the end of pagination, or a page
+    with real further pages behind it gets silently truncated."""
+    soup = BeautifulSoup(html, "html.parser")
+    data_table = _find_data_table(soup.find_all("table"))
+    if data_table is None:
+        return 0
+    return sum(1 for tr in data_table.find_all("tr") if len(tr.find_all("td")) >= 7)
+
+
 class DataTableNotFoundError(RuntimeError):
     """The results table couldn't be located in the page at all — distinct
     from a found table with zero matching rows, which is a legitimate
@@ -168,6 +202,19 @@ class DataTableNotFoundError(RuntimeError):
     site layout change surfaces as a scrape failure (skips cache_meta,
     allows retry) rather than looking identical to a real empty district.
     """
+
+
+class PartialScrapeError(RuntimeError):
+    """Pagination stopped early (page 2+) because the data table couldn't
+    be found on a later page. Carries whatever rows were already collected
+    via .rows — the caller can still persist them, but should treat the
+    scrape as incomplete (e.g. skip cache_meta) rather than fully successful,
+    since further rows may exist on the page that failed to parse.
+    """
+
+    def __init__(self, rows):
+        super().__init__(f"Pagination stopped early with {len(rows)} rows collected")
+        self.rows = rows
 
 
 def parse_auction_rows(html: str, district: str, city: str = None) -> list:
@@ -255,11 +302,47 @@ def scrape_district(district: str) -> list:
 
     all_rows = []
     page = 1
+
+    def _page_failure():
+        """Build (not raise) the PartialScrapeError a page 2+ failure
+        should be reported as, so the call site reads as
+        `raise _page_failure() from exc` — the control-flow jump stays
+        visible at the raise site instead of hidden inside a helper.
+        Already-collected rows are kept; the caller just needs to know
+        the scrape didn't fully succeed. (Page 1 has nothing to preserve
+        and nothing to build — its failures are re-raised directly with
+        a bare `raise` at the call site instead.)"""
+        logger.warning(
+            "Page %d failed for %s; stopping with %d rows collected",
+            page, district, len(all_rows), exc_info=True,
+        )
+        return PartialScrapeError(all_rows)
+
     while True:
+        if page > 1:
+            # Pace requests so a large (capped) scrape doesn't fire ~100
+            # rapid, unpaced requests at the live site.
+            time.sleep(PAGE_REQUEST_DELAY_SECONDS)
+
         # Fetch a fresh CAPTCHA for every page; the code appears to be
         # single-use/short-lived and reusing it causes later pages to fail.
-        captcha_resp = session.get(f"{BASE_URL}/Home/Captcha", timeout=15)
-        captcha_code = captcha_resp.json()["code"]
+        try:
+            captcha_resp = session.get(f"{BASE_URL}/Home/Captcha", timeout=15)
+            captcha_resp.raise_for_status()
+            captcha_code = captcha_resp.json()["code"]
+        except requests.RequestException as exc:
+            if page == 1:
+                raise
+            raise _page_failure() from exc
+        except (ValueError, KeyError) as exc:
+            # Bad/missing "code" in the CAPTCHA response body itself — a
+            # site-side anomaly, not a bug in this function. Scoped to
+            # just this call so a ValueError/KeyError from a *different*
+            # bug (e.g. inside parse_auction_rows below) isn't mistaken
+            # for the same thing.
+            if page == 1:
+                raise
+            raise _page_failure() from exc
 
         params = {
             "COUNTY": county_code,
@@ -268,28 +351,42 @@ def scrape_district(district: str) -> list:
             "REQUERY": "false" if page == 1 else "true",
             "PAGINATION_PAGE_NO": str(page),
         }
-        resp = session.get(f"{BASE_URL}/Estate/Query", params=params, timeout=20)
-        resp.raise_for_status()
+        try:
+            resp = session.get(f"{BASE_URL}/Estate/Query", params=params, timeout=20)
+            resp.raise_for_status()
+        except requests.RequestException as exc:
+            if page == 1:
+                raise
+            raise _page_failure() from exc
 
         try:
             rows = parse_auction_rows(resp.text, district, city)
-        except DataTableNotFoundError:
+        except DataTableNotFoundError as exc:
             if page == 1:
-                raise  # no data at all — a real scrape failure, not "0 results"
-            # Already-collected pages are kept; only pagination stops here.
-            logger.warning(
-                "No data table on page %d for %s; stopping with %d rows collected",
-                page, district, len(all_rows),
-            )
-            break
+                raise
+            raise _page_failure() from exc
 
         all_rows.extend(rows)
 
         if not rows:
-            break
+            if _raw_row_count(resp.text) == 0:
+                break  # genuinely no more data
+            # The page had real rows, but none of them parsed (most
+            # likely no address could be extracted from any of them) —
+            # that's a data-quality problem, not "end of results", so
+            # pagination keeps going rather than silently truncating
+            # whatever real further pages exist.
+            logger.warning(
+                "Page %d for %s had rows but none parsed; continuing pagination",
+                page, district,
+            )
         page += 1
-        if page > 20:  # safety cap
-            break
+        if page > PAGE_CAP:
+            logger.warning(
+                "Hit the %d-page safety cap for %s with %d rows collected",
+                PAGE_CAP, district, len(all_rows),
+            )
+            raise PartialScrapeError(all_rows)
 
     logger.info("Scraped %d rows for %s", len(all_rows), district)
     return all_rows

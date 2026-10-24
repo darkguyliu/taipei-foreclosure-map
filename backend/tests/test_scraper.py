@@ -7,6 +7,14 @@ from scraper import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _no_real_sleeps(monkeypatch):
+    # scrape_district paces real requests with time.sleep between pages;
+    # none of these tests hit a real site, and the page-cap tests loop
+    # ~50 times, so this keeps the suite fast and deterministic.
+    monkeypatch.setattr(scraper_module.time, "sleep", lambda seconds: None)
+
+
 class _FakeResp:
     def __init__(self, json_data=None, text=""):
         self._json = json_data
@@ -158,7 +166,9 @@ def test_scrape_district_unknown_district_returns_empty():
 def test_scrape_district_keeps_earlier_pages_if_a_later_page_has_no_table(monkeypatch):
     # If the live site's table disappears on page 2+ (e.g. a transient glitch
     # or an edge case this project hasn't seen), pagination should stop and
-    # return what page 1 already collected — not discard it.
+    # raise PartialScrapeError carrying what page 1 already collected — not
+    # discard it, but also not let the caller treat this as a full success
+    # (see routes.py's handling: persist .rows, but skip cache_meta).
     monkeypatch.setattr(scraper_module.requests, "Session", _FakeSession)
 
     page1_rows = [{"case_number": "P1-1"}]
@@ -172,7 +182,162 @@ def test_scrape_district_keeps_earlier_pages_if_a_later_page_has_no_table(monkey
 
     monkeypatch.setattr(scraper_module, "parse_auction_rows", _fake_parse)
 
-    assert scraper_module.scrape_district("大安區") == page1_rows
+    with pytest.raises(scraper_module.PartialScrapeError) as exc_info:
+        scraper_module.scrape_district("大安區")
+    assert exc_info.value.rows == page1_rows
+
+
+class _FlakyQuerySession(_FakeSession):
+    """Like _FakeSession, but the Estate/Query request itself fails with a
+    network error on its second call (i.e. page 2's query) — a realistic
+    place for requests.RequestException to actually originate, unlike
+    parse_auction_rows (pure HTML parsing; it can't raise network errors)."""
+
+    def __init__(self):
+        super().__init__()
+        self._query_calls = 0
+
+    def get(self, url, **kwargs):
+        if "Estate/Query" in url:
+            self._query_calls += 1
+            if self._query_calls == 2:
+                raise scraper_module.requests.exceptions.ConnectionError("network blip")
+        return super().get(url, **kwargs)
+
+
+_NO_ADDRESS_ROW_HTML = """
+<table>
+  <tr>
+    <th>No</th><th>案號</th><th>拍賣日時</th><th>拍賣註記</th>
+    <th>是否點交</th><th>拍定日期</th><th>說明</th><th>環景圖</th><th>污染</th>
+  </tr>
+  <tr>
+    <td>1</td>
+    <td>1060100008317(台北分署／申股)</td>
+    <td>2021/11/02 15:00:00第三拍</td>
+    <td></td>
+    <td>Y</td>
+    <td>110/11/0244,129,999</td>
+    <td>一、公告拍賣房屋 底價：37,700,000面積：39.51坪</td>
+    <td></td>
+    <td>查詢</td>
+  </tr>
+</table>
+"""
+
+_ONE_VALID_ROW_HTML = """
+<table>
+  <tr>
+    <th>No</th><th>案號</th><th>拍賣日時</th><th>拍賣註記</th>
+    <th>是否點交</th><th>拍定日期</th><th>說明</th><th>環景圖</th><th>污染</th>
+  </tr>
+  <tr>
+    <td>1</td>
+    <td>1070100000001(台北分署／甲股)</td>
+    <td>2022/01/01 10:00:00第一拍</td>
+    <td></td>
+    <td>Y</td>
+    <td></td>
+    <td>
+      地址/完整地號：臺北市大安區仁愛路一段1號
+      底價：10,000,000面積：20.00坪
+    </td>
+    <td></td>
+    <td>查詢</td>
+  </tr>
+</table>
+"""
+
+_EMPTY_TABLE_HTML = """
+<table>
+  <tr>
+    <th>No</th><th>案號</th><th>拍賣日時</th><th>拍賣註記</th>
+    <th>是否點交</th><th>拍定日期</th><th>說明</th><th>環景圖</th><th>污染</th>
+  </tr>
+</table>
+"""
+
+
+class _ScriptedQuerySession(_FakeSession):
+    """Returns a different, real HTML page per Estate/Query call, in
+    order, for exercising the full real parse_auction_rows pipeline
+    (not mocked) across several distinct pages."""
+
+    def __init__(self, pages):
+        super().__init__()
+        self._pages = list(pages)
+        self._query_calls = 0
+
+    def get(self, url, **kwargs):
+        if "Estate/Query" in url:
+            html = self._pages[self._query_calls]
+            self._query_calls += 1
+            return _FakeResp(text=html)
+        return super().get(url, **kwargs)
+
+
+def test_scrape_district_does_not_stop_on_a_page_with_rows_but_no_addresses(monkeypatch):
+    # A page can have real <tr> candidates that all fail to yield an
+    # address (e.g. a layout quirk on just that page) without that being
+    # "the end of results" — _raw_row_count distinguishes this from a
+    # genuinely empty table so pagination doesn't silently stop short of
+    # real further pages. Uses the real parse_auction_rows (not mocked)
+    # against crafted HTML so the fix is exercised end-to-end, not just
+    # at the mocked-return-value level.
+    monkeypatch.setattr(
+        scraper_module.requests, "Session",
+        lambda: _ScriptedQuerySession([_NO_ADDRESS_ROW_HTML, _ONE_VALID_ROW_HTML, _EMPTY_TABLE_HTML]),
+    )
+
+    rows = scraper_module.scrape_district("大安區")  # must not raise or stop early
+
+    assert len(rows) == 1
+    assert rows[0]["case_number"] == "1070100000001"
+
+
+def test_scrape_district_treats_any_later_page_failure_as_partial(monkeypatch):
+    # Not just DataTableNotFoundError — a network-level failure on page 2+
+    # must also preserve earlier pages instead of discarding them as a
+    # total scrape failure. requests.RequestException (along with
+    # DataTableNotFoundError/ValueError/KeyError) is one of the expected
+    # failure modes this is now narrowed to catching.
+    monkeypatch.setattr(scraper_module.requests, "Session", _FlakyQuerySession)
+
+    page1_rows = [{"case_number": "P1-1"}]
+    calls = {"n": 0}
+
+    def _fake_parse(html, district, city=None):
+        calls["n"] += 1
+        return page1_rows if calls["n"] == 1 else [{"case_number": f"P{calls['n']}"}]
+
+    monkeypatch.setattr(scraper_module, "parse_auction_rows", _fake_parse)
+
+    with pytest.raises(scraper_module.PartialScrapeError) as exc_info:
+        scraper_module.scrape_district("大安區")
+    assert exc_info.value.rows == page1_rows
+
+
+def test_scrape_district_does_not_swallow_a_real_bug_as_partial(monkeypatch):
+    # A programming error (e.g. a KeyError-free TypeError from a bug in
+    # parse_auction_rows itself) is not one of the expected failure modes
+    # and must propagate as a hard failure, not get quietly downgraded to
+    # "partial success" with just a warning log — that would hide a real
+    # bug behind cache_meta simply never updating.
+    monkeypatch.setattr(scraper_module.requests, "Session", _FakeSession)
+
+    page1_rows = [{"case_number": "P1-1"}]
+    calls = {"n": 0}
+
+    def _fake_parse(html, district, city=None):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return page1_rows
+        raise TypeError("bug: unsupported operand")
+
+    monkeypatch.setattr(scraper_module, "parse_auction_rows", _fake_parse)
+
+    with pytest.raises(TypeError):
+        scraper_module.scrape_district("大安區")
 
 
 def test_scrape_district_raises_if_first_page_has_no_table(monkeypatch):
@@ -186,6 +351,44 @@ def test_scrape_district_raises_if_first_page_has_no_table(monkeypatch):
 
     with pytest.raises(DataTableNotFoundError):
         scraper_module.scrape_district("大安區")
+
+
+def test_scrape_district_treats_page_cap_as_partial(monkeypatch):
+    # Hitting the page-count safety cap means there may well be more pages
+    # left unread — that's incomplete, not a confirmed full result, so it
+    # must raise PartialScrapeError just like a mid-pagination table miss
+    # does, rather than silently returning as if nothing were missed.
+    # With every page non-empty, exactly PAGE_CAP pages get fetched before
+    # giving up (the cap check runs right after incrementing past it).
+    monkeypatch.setattr(scraper_module.requests, "Session", _FakeSession)
+    monkeypatch.setattr(
+        scraper_module, "parse_auction_rows",
+        lambda html, district, city=None: [{"case_number": "X"}],  # always another row
+    )
+
+    with pytest.raises(scraper_module.PartialScrapeError) as exc_info:
+        scraper_module.scrape_district("大安區")
+    assert len(exc_info.value.rows) == scraper_module.PAGE_CAP
+
+
+def test_scrape_district_does_not_treat_a_legitimately_complete_district_as_partial(monkeypatch):
+    # A district whose true result set lands one page short of the cap
+    # (PAGE_CAP - 1 full pages, then a genuinely empty page PAGE_CAP) must
+    # not be misjudged as partial — the loop still tries page PAGE_CAP
+    # itself before giving up, so this is the largest true page count that
+    # resolves correctly (PAGE_CAP itself is the unavoidable boundary: see
+    # PAGE_CAP's comment on why no finite cap can be made fully immune).
+    monkeypatch.setattr(scraper_module.requests, "Session", _FakeSession)
+    calls = {"n": 0}
+
+    def _fake_parse(html, district, city=None):
+        calls["n"] += 1
+        return [{"case_number": f"P{calls['n']}"}] if calls["n"] <= scraper_module.PAGE_CAP - 1 else []
+
+    monkeypatch.setattr(scraper_module, "parse_auction_rows", _fake_parse)
+
+    rows = scraper_module.scrape_district("大安區")  # must not raise
+    assert len(rows) == scraper_module.PAGE_CAP - 1
 
 
 NO_MAPS_LINK_HTML = """
@@ -260,6 +463,24 @@ def test_address_fallback_stops_at_other_field_labels():
     # still terminate the match instead of being appended as noise.
     text = "地址/完整地號：臺北市大安區信義路三段186號5樓權利範圍：全部底價：100"
     assert _extract_address_fallback(text) == "臺北市大安區信義路三段186號5樓"
+
+
+def test_address_fallback_stops_at_additional_known_labels():
+    for label in ["坐落", "備註", "車位", "他項權利", "建號", "使用執照"]:
+        text = f"地址/完整地號：臺北市大安區信義路三段186號5樓{label}：測試底價：100"
+        assert _extract_address_fallback(text) == "臺北市大安區信義路三段186號5樓", label
+
+
+def test_address_fallback_logs_warning_on_unmatched_label(caplog):
+    # A field label not in stop_labels is a known, open-ended limitation.
+    # Use filler long enough that no stop point (comma/known label/end of
+    # string) falls within the 60-char cap, so the regex finds no match at
+    # all — that must at least be logged (at a visible level) so it can be
+    # found and added, instead of silently dropping the row with no trace.
+    text = "地址/完整地號：" + "甲" * 65 + "底價：100"
+    with caplog.at_level(logging.WARNING, logger="scraper"):
+        assert _extract_address_fallback(text) == ""
+    assert any("didn't match" in r.message for r in caplog.records)
 
 
 def test_address_fallback_keeps_trailing_号_before_a_label():

@@ -2,7 +2,7 @@
 import sqlite3
 import os
 from contextlib import contextmanager
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Iterable, Tuple
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "data.db")
 
@@ -126,14 +126,35 @@ def upsert_cache_meta(district: str) -> None:
         """, (district,))
 
 
-def get_geocode_cache() -> Dict[str, tuple]:
-    """Map every already-geocoded address_norm to its (lat, lng), for a
-    single bulk lookup instead of one query per row during a refresh."""
+_GEOCODE_CACHE_QUERY_CHUNK = 500  # stay well under SQLite's variable-count limit
+
+
+def get_geocode_cache(address_norms: Iterable[Optional[str]]) -> Dict[str, Tuple[float, float]]:
+    """Map each of the given address_norm values to its (lat, lng) where
+    already geocoded, via bulk lookups scoped to this batch instead of one
+    query per row (or loading every district's history). None entries
+    (e.g. an address that failed to normalize) are ignored."""
+    distinct = list({a for a in address_norms if a})
+    if not distinct:
+        return {}
+    cache: Dict[str, Tuple[float, float]] = {}
     with get_db() as conn:
-        rows = conn.execute(
-            "SELECT address_norm, lat, lng FROM properties WHERE lat IS NOT NULL"
-        ).fetchall()
-    return {row["address_norm"]: (row["lat"], row["lng"]) for row in rows}
+        for i in range(0, len(distinct), _GEOCODE_CACHE_QUERY_CHUNK):
+            chunk = distinct[i:i + _GEOCODE_CACHE_QUERY_CHUNK]
+            placeholders = ",".join("?" * len(chunk))
+            # ORDER BY + dict construction below: if an address_norm has
+            # multiple rows with different coordinates, the most recently
+            # updated one wins deterministically. updated_at alone only
+            # has second resolution, so id breaks ties within the same
+            # second (higher id = inserted/updated later).
+            rows = conn.execute(
+                f"SELECT address_norm, lat, lng FROM properties "
+                f"WHERE lat IS NOT NULL AND address_norm IN ({placeholders}) "
+                f"ORDER BY updated_at ASC, id ASC",
+                chunk,
+            ).fetchall()
+            cache.update((row["address_norm"], (row["lat"], row["lng"])) for row in rows)
+    return cache
 
 
 def get_properties(

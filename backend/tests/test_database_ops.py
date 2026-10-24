@@ -98,9 +98,111 @@ def test_get_geocode_cache_maps_address_norm_to_coords():
         "floor_price": 2_000_000, "area": 20.0, "property_type": "住宅",
         "auction_count": 1, "auction_date": "2026-04-01", "auction_url": "",
     })
-    cache = get_geocode_cache()
+    cache = get_geocode_cache([
+        "台北市大安區仁愛路一段1號", "台北市大安區仁愛路二段2號",
+    ])
     assert cache["台北市大安區仁愛路一段1號"] == (25.03, 121.54)
     assert "台北市大安區仁愛路二段2號" not in cache
+
+
+def test_get_geocode_cache_scoped_to_requested_addresses():
+    # A geocoded address not included in the requested list must not come
+    # back — the cache is scoped to this batch, not the whole table.
+    upsert_property({
+        "case_number": "GEO-003", "court": "台北地院", "district": "信義區",
+        "address": "台北市信義區松仁路1號",
+        "address_norm": "台北市信義區松仁路1號",
+        "lat": 25.04, "lng": 121.57,
+        "floor_price": 3_000_000, "area": 15.0, "property_type": "住宅",
+        "auction_count": 1, "auction_date": "2026-04-01", "auction_url": "",
+    })
+    cache = get_geocode_cache(["台北市大安區仁愛路一段1號"])  # unrelated address
+    assert cache == {}
+
+
+def test_get_geocode_cache_empty_input_returns_empty_dict():
+    assert get_geocode_cache([]) == {}
+
+
+def test_get_geocode_cache_chunks_large_batches(monkeypatch):
+    # Force a tiny chunk size so 5 addresses require 3 round trips, and
+    # confirm the results still merge correctly — guards against the
+    # SQLite host-parameter limit a single unchunked IN (...) could hit.
+    monkeypatch.setattr(database, "_GEOCODE_CACHE_QUERY_CHUNK", 2)
+    addresses = [f"台北市大安區測試路{i}號" for i in range(5)]
+    for i, addr in enumerate(addresses):
+        upsert_property({
+            "case_number": f"CHUNK-{i}", "court": "台北地院", "district": "大安區",
+            "address": addr, "address_norm": addr,
+            "lat": 25.0 + i, "lng": 121.0 + i,
+            "floor_price": 1_000_000, "area": 10.0, "property_type": "住宅",
+            "auction_count": 1, "auction_date": "2026-04-01", "auction_url": "",
+        })
+    cache = get_geocode_cache(addresses)
+    assert len(cache) == 5
+    for i, addr in enumerate(addresses):
+        assert cache[addr] == (25.0 + i, 121.0 + i)
+
+
+def test_get_geocode_cache_prefers_most_recently_updated_coords():
+    # Two different listings can share an address_norm (e.g. a re-listed
+    # case). Which coordinates win must be deterministic, not whatever
+    # order SQLite happens to return rows in.
+    addr = "台北市大安區重複路1號"
+    upsert_property({
+        "case_number": "DUP-OLD", "court": "台北地院", "district": "大安區",
+        "address": addr, "address_norm": addr,
+        "lat": 25.01, "lng": 121.01,
+        "floor_price": 1_000_000, "area": 10.0, "property_type": "住宅",
+        "auction_count": 1, "auction_date": "2026-04-01", "auction_url": "",
+    })
+    upsert_property({
+        "case_number": "DUP-NEW", "court": "台北地院", "district": "大安區",
+        "address": addr, "address_norm": addr,
+        "lat": 25.02, "lng": 121.02,
+        "floor_price": 1_000_000, "area": 10.0, "property_type": "住宅",
+        "auction_count": 1, "auction_date": "2026-04-01", "auction_url": "",
+    })
+    # Pin distinct updated_at values directly so the test doesn't depend
+    # on both upserts landing in the same real-time second.
+    conn = get_connection()
+    conn.execute("UPDATE properties SET updated_at = '2020-01-01 00:00:00' WHERE case_number = 'DUP-OLD'")
+    conn.execute("UPDATE properties SET updated_at = '2020-01-02 00:00:00' WHERE case_number = 'DUP-NEW'")
+    conn.commit()
+    conn.close()
+
+    cache = get_geocode_cache([addr])
+    assert cache[addr] == (25.02, 121.02)
+
+
+def test_get_geocode_cache_breaks_same_second_tie_by_id():
+    # updated_at only has second resolution, so two rows written within
+    # the same wall-clock second would otherwise sort in whatever order
+    # SQLite happens to return them. id (insertion order) must break the
+    # tie deterministically — the higher id (written later) wins.
+    addr = "台北市大安區同秒路1號"
+    upsert_property({
+        "case_number": "TIE-OLD", "court": "台北地院", "district": "大安區",
+        "address": addr, "address_norm": addr,
+        "lat": 25.11, "lng": 121.11,
+        "floor_price": 1_000_000, "area": 10.0, "property_type": "住宅",
+        "auction_count": 1, "auction_date": "2026-04-01", "auction_url": "",
+    })
+    upsert_property({
+        "case_number": "TIE-NEW", "court": "台北地院", "district": "大安區",
+        "address": addr, "address_norm": addr,
+        "lat": 25.12, "lng": 121.12,
+        "floor_price": 1_000_000, "area": 10.0, "property_type": "住宅",
+        "auction_count": 1, "auction_date": "2026-04-01", "auction_url": "",
+    })
+    # Pin both rows to the exact same updated_at so only id can break the tie.
+    conn = get_connection()
+    conn.execute("UPDATE properties SET updated_at = '2020-01-01 00:00:00' WHERE address_norm = ?", (addr,))
+    conn.commit()
+    conn.close()
+
+    cache = get_geocode_cache([addr])
+    assert cache[addr] == (25.12, 121.12)
 
 
 def test_get_properties_filter_by_price():
