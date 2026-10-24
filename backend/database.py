@@ -51,7 +51,11 @@ def init_db():
                 auction_date  TEXT,
                 auction_url   TEXT,
                 created_at    TEXT DEFAULT (datetime('now', 'localtime')),
-                updated_at    TEXT DEFAULT (datetime('now', 'localtime'))
+                -- upsert_property always supplies this explicitly (with
+                -- millisecond precision, see there) rather than relying on
+                -- this DEFAULT; kept in the same format so the column
+                -- isn't mixing two precisions under one name.
+                updated_at    TEXT DEFAULT (strftime('%Y-%m-%d %H:%M:%f', 'now', 'localtime'))
             );
 
             CREATE TABLE IF NOT EXISTS avg_prices (
@@ -89,7 +93,7 @@ def upsert_property(prop: Dict) -> None:
                 (:case_number, :court, :district, :address, :address_norm,
                  :lat, :lng, :floor_price, :area, :property_type,
                  :auction_count, :auction_date, :auction_url,
-                 datetime('now', 'localtime'))
+                 strftime('%Y-%m-%d %H:%M:%f', 'now', 'localtime'))
             ON CONFLICT(case_number) DO UPDATE SET
                 court=excluded.court,
                 address=excluded.address,
@@ -144,9 +148,15 @@ def get_geocode_cache(address_norms: Iterable[Optional[str]]) -> Dict[str, Tuple
             placeholders = ",".join("?" * len(chunk))
             # ORDER BY + dict construction below: if an address_norm has
             # multiple rows with different coordinates, the most recently
-            # updated one wins deterministically. updated_at alone only
-            # has second resolution, so id breaks ties within the same
-            # second (higher id = inserted/updated later).
+            # updated one wins deterministically. updated_at (millisecond
+            # precision, see upsert_property) is the primary sort key and
+            # does the actual recency ordering. id is only a stable
+            # tiebreaker for the rare case two rows land in the exact same
+            # millisecond (e.g. two case numbers for the same address
+            # processed back-to-back in one refresh) — it does NOT track
+            # recency itself, since ON CONFLICT DO UPDATE leaves an
+            # existing row's id unchanged; it just keeps results
+            # deterministic instead of depending on SQLite's return order.
             rows = conn.execute(
                 f"SELECT address_norm, lat, lng FROM properties "
                 f"WHERE lat IS NOT NULL AND address_norm IN ({placeholders}) "
