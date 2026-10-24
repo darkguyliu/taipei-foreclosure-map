@@ -208,6 +208,41 @@ def test_get_geocode_cache_breaks_same_second_tie_by_millisecond():
     assert cache[addr] == (25.12, 121.12)
 
 
+def test_get_geocode_cache_breaks_exact_same_millisecond_tie_by_id():
+    # Two case numbers for the same address processed back-to-back within
+    # one refresh can land in the exact same millisecond. id can't
+    # substitute for recency (ON CONFLICT DO UPDATE leaves it unchanged),
+    # but it's still a cheap, stable fallback so this result doesn't
+    # depend on whatever order SQLite happens to return tied rows in.
+    addr = "台北市大安區同毫秒路1號"
+    upsert_property({
+        "case_number": "MS-TIE-OLD", "court": "台北地院", "district": "大安區",
+        "address": addr, "address_norm": addr,
+        "lat": 25.21, "lng": 121.21,
+        "floor_price": 1_000_000, "area": 10.0, "property_type": "住宅",
+        "auction_count": 1, "auction_date": "2026-04-01", "auction_url": "",
+    })
+    upsert_property({
+        "case_number": "MS-TIE-NEW", "court": "台北地院", "district": "大安區",
+        "address": addr, "address_norm": addr,
+        "lat": 25.22, "lng": 121.22,
+        "floor_price": 1_000_000, "area": 10.0, "property_type": "住宅",
+        "auction_count": 1, "auction_date": "2026-04-01", "auction_url": "",
+    })
+    conn = get_connection()
+    conn.execute(
+        "UPDATE properties SET updated_at = '2020-01-01 00:00:00.500' WHERE address_norm = ?",
+        (addr,),
+    )
+    conn.commit()
+    conn.close()
+
+    # MS-TIE-NEW was inserted second, so it has the higher id — that's
+    # the row id ASC should surface as the tiebreak winner here.
+    cache = get_geocode_cache([addr])
+    assert cache[addr] == (25.22, 121.22)
+
+
 def test_get_properties_filter_by_price():
     for i, price in enumerate([3_000_000, 8_000_000, 15_000_000]):
         upsert_property({
