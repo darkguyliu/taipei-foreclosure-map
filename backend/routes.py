@@ -20,57 +20,32 @@ router = APIRouter(prefix="/api")
 
 GOOGLE_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY", "")
 
-# A refresh scrapes the live site and can call the paid Google Geocoding
-# API per new address, so it's throttled per district rather than left
-# open to unlimited calls. Tracked here (not via cache_meta.last_refreshed_at)
-# because that column is only written on a *successful* refresh — keying
-# the throttle off it would mean a district that keeps failing to scrape
-# is never actually throttled. This state is process-local: it only
-# guards a single uvicorn worker, which matches how this app is run (see
-# .claude/launch.json — no --workers flag). A multi-worker deployment
-# would need a DB-backed lock instead.
-#
-# time.monotonic() rather than datetime.now(): this is purely interval
-# math (has N seconds passed), and monotonic time can't jump backwards or
-# forwards from a wall-clock adjustment (NTP sync, DST, manual change).
+# Per-district refresh cooldown. Keyed off this dict rather than
+# cache_meta.last_refreshed_at, which only updates on success — a
+# district that keeps failing to scrape would otherwise never be
+# throttled. time.monotonic() because this is pure interval math, immune
+# to wall-clock jumps. Process-local: matches running this app as a
+# single uvicorn worker (see .claude/launch.json); a multi-worker
+# deployment would need a DB-backed lock instead.
 MIN_REFRESH_INTERVAL_SECONDS = 5 * 60
 _last_attempt: Dict[str, float] = {}
 
-# The per-district throttle above doesn't bound the worst case where a
-# caller cycles through every known district — each one individually
-# satisfies the 5-minute gap, but the site still gets hit and the paid
-# Geocoding API still gets called continuously. This caps the rate across
-# *all* districts combined, independent of which one is being refreshed.
-#
-# This is shared across every caller with no per-user/per-IP accounting —
-# fine for this app's actual single-user/trusted-access deployment, but
-# if it's ever exposed publicly, one anonymous caller hitting this every
-# 20s would starve everyone else's refreshes. Would need per-IP or
-# per-API-key throttling (and likely auth on the endpoint generally) at
-# that point, not just this global one.
+# Caps the rate across *all* districts combined, so a caller can't bypass
+# the per-district cooldown by just cycling through every district. No
+# per-user/per-IP accounting — fine for trusted/single-user access; would
+# need that (and likely auth) before exposing this publicly.
 GLOBAL_MIN_INTERVAL_SECONDS = 20
 _last_global_attempt: Optional[float] = None
 
-# Districts with a refresh currently running as a BackgroundTask, mapped
-# to when they started. Guards against two concurrent refreshes of the
-# *same* district each loading their own geocode_cache snapshot and
-# re-geocoding (and re-paying for) the same new addresses. An entry older
-# than MAX_REFRESH_DURATION_SECONDS is treated as stale rather than still
-# "in progress" — this is for the case where the BackgroundTask is never
-# actually run within this same process (e.g. an error during response
-# handling after the slot was taken but before the task got scheduled),
-# not a process restart: _refreshing lives in memory, so a restart clears
-# it anyway and this entry wouldn't survive that regardless.
-#
-# Guarded by the same lock as _last_attempt so the recency check and the
-# in-progress check are one atomic step — otherwise two requests arriving
-# close together could both pass the recency check before either one
-# takes the in-progress flag.
-#
-# Set comfortably above the theoretical worst case so a merely slow (not
-# stuck) scrape is never mistaken for stale: scraper.PAGE_CAP pages, each
-# up to ~35s (CAPTCHA + query timeouts + the inter-page pause), is itself
-# already close to 30 minutes before any geocoding time is added.
+# Districts with a refresh currently running, mapped to when they
+# started — guards against two concurrent refreshes of the same district
+# double-paying to geocode the same new address. An entry older than
+# MAX_REFRESH_DURATION_SECONDS is stale (the BackgroundTask never ran in
+# this process) rather than still in progress. Guarded by the same lock
+# as _last_attempt so the recency and in-progress checks are one atomic
+# step. The duration is set above the worst-case scrape time (PAGE_CAP
+# pages * ~35s each, before geocoding) so a merely slow scrape isn't
+# mistaken for a stuck one.
 MAX_REFRESH_DURATION_SECONDS = 60 * 60
 _refreshing: Dict[str, float] = {}
 _refresh_lock = threading.Lock()

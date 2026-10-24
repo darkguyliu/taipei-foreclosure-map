@@ -144,6 +144,37 @@ def test_get_geocode_cache_chunks_large_batches(monkeypatch):
         assert cache[addr] == (25.0 + i, 121.0 + i)
 
 
+def test_get_geocode_cache_prefers_most_recently_updated_coords():
+    # Two different listings can share an address_norm (e.g. a re-listed
+    # case). Which coordinates win must be deterministic, not whatever
+    # order SQLite happens to return rows in.
+    addr = "台北市大安區重複路1號"
+    upsert_property({
+        "case_number": "DUP-OLD", "court": "台北地院", "district": "大安區",
+        "address": addr, "address_norm": addr,
+        "lat": 25.01, "lng": 121.01,
+        "floor_price": 1_000_000, "area": 10.0, "property_type": "住宅",
+        "auction_count": 1, "auction_date": "2026-04-01", "auction_url": "",
+    })
+    upsert_property({
+        "case_number": "DUP-NEW", "court": "台北地院", "district": "大安區",
+        "address": addr, "address_norm": addr,
+        "lat": 25.02, "lng": 121.02,
+        "floor_price": 1_000_000, "area": 10.0, "property_type": "住宅",
+        "auction_count": 1, "auction_date": "2026-04-01", "auction_url": "",
+    })
+    # Pin distinct updated_at values directly so the test doesn't depend
+    # on both upserts landing in the same real-time second.
+    conn = get_connection()
+    conn.execute("UPDATE properties SET updated_at = '2020-01-01 00:00:00' WHERE case_number = 'DUP-OLD'")
+    conn.execute("UPDATE properties SET updated_at = '2020-01-02 00:00:00' WHERE case_number = 'DUP-NEW'")
+    conn.commit()
+    conn.close()
+
+    cache = get_geocode_cache([addr])
+    assert cache[addr] == (25.02, 121.02)
+
+
 def test_get_properties_filter_by_price():
     for i, price in enumerate([3_000_000, 8_000_000, 15_000_000]):
         upsert_property({

@@ -7,10 +7,12 @@ import { MapView } from './components/MapView'
 import { useProperties } from './hooks/useProperties'
 import { useAvgPrices } from './hooks/useAvgPrices'
 import { useFavorites } from './hooks/useFavorites'
+import { DISTRICT_GROUPS } from './constants'
 import './App.css'
 
 const MAPS_API_KEY = import.meta.env.VITE_GOOGLE_MAPS_API_KEY || ''
 const DISTRICT_STORAGE_KEY = 'foreclosure_district'
+const VALID_DISTRICTS = new Set(DISTRICT_GROUPS.flatMap(group => group.districts))
 
 const REFRESH_STATUS_MESSAGES = {
   400: '無效的行政區',
@@ -24,7 +26,11 @@ export default function App() {
   // full page load, but at least restores where they were.
   const [district, setDistrict] = useState(() => {
     try {
-      return localStorage.getItem(DISTRICT_STORAGE_KEY) || ''
+      const stored = localStorage.getItem(DISTRICT_STORAGE_KEY) || ''
+      // Guard against a corrupted value or a district list that's changed
+      // since this was saved — an invalid district would otherwise query
+      // the backend with a value DistrictSelector itself never offers.
+      return VALID_DISTRICTS.has(stored) ? stored : ''
     } catch {
       return ''
     }

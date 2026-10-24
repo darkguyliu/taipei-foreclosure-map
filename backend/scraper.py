@@ -288,19 +288,15 @@ def scrape_district(district: str) -> list:
     all_rows = []
     page = 1
 
-    def _page_failure(exc):
-        """Return (not raise) the exception this page's failure should be
-        reported as, so every call site reads as `raise _page_failure(exc)`
-        — the control-flow jump stays visible at the raise site instead of
-        being hidden inside this helper. A failure in an *expected*
-        category (network/HTTP error, bad CAPTCHA JSON, no data table):
-        on page 1 there's nothing collected yet, so it's a real scrape
-        failure — exc itself, unchanged. On page 2+, keep what's already
-        collected but signal the scrape as incomplete via
-        PartialScrapeError so the caller doesn't treat it as a full
-        success."""
-        if page == 1:
-            return exc
+    def _page_failure():
+        """Build (not raise) the PartialScrapeError a page 2+ failure
+        should be reported as, so the call site reads as
+        `raise _page_failure() from exc` — the control-flow jump stays
+        visible at the raise site instead of hidden inside a helper.
+        Already-collected rows are kept; the caller just needs to know
+        the scrape didn't fully succeed. (Page 1 has nothing to preserve
+        and nothing to build — its failures are re-raised directly with
+        a bare `raise` at the call site instead.)"""
         logger.warning(
             "Page %d failed for %s; stopping with %d rows collected",
             page, district, len(all_rows), exc_info=True,
@@ -320,14 +316,18 @@ def scrape_district(district: str) -> list:
             captcha_resp.raise_for_status()
             captcha_code = captcha_resp.json()["code"]
         except requests.RequestException as exc:
-            raise _page_failure(exc) from exc
+            if page == 1:
+                raise
+            raise _page_failure() from exc
         except (ValueError, KeyError) as exc:
             # Bad/missing "code" in the CAPTCHA response body itself — a
             # site-side anomaly, not a bug in this function. Scoped to
             # just this call so a ValueError/KeyError from a *different*
             # bug (e.g. inside parse_auction_rows below) isn't mistaken
             # for the same thing.
-            raise _page_failure(exc) from exc
+            if page == 1:
+                raise
+            raise _page_failure() from exc
 
         params = {
             "COUNTY": county_code,
@@ -340,12 +340,16 @@ def scrape_district(district: str) -> list:
             resp = session.get(f"{BASE_URL}/Estate/Query", params=params, timeout=20)
             resp.raise_for_status()
         except requests.RequestException as exc:
-            raise _page_failure(exc) from exc
+            if page == 1:
+                raise
+            raise _page_failure() from exc
 
         try:
             rows = parse_auction_rows(resp.text, district, city)
         except DataTableNotFoundError as exc:
-            raise _page_failure(exc) from exc
+            if page == 1:
+                raise
+            raise _page_failure() from exc
 
         all_rows.extend(rows)
 
