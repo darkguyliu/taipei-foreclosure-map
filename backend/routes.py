@@ -66,7 +66,12 @@ _last_global_attempt: Optional[float] = None
 # in-progress check are one atomic step — otherwise two requests arriving
 # close together could both pass the recency check before either one
 # takes the in-progress flag.
-MAX_REFRESH_DURATION_SECONDS = 30 * 60
+#
+# Set comfortably above the theoretical worst case so a merely slow (not
+# stuck) scrape is never mistaken for stale: scraper.PAGE_CAP pages, each
+# up to ~35s (CAPTCHA + query timeouts + the inter-page pause), is itself
+# already close to 30 minutes before any geocoding time is added.
+MAX_REFRESH_DURATION_SECONDS = 60 * 60
 _refreshing: Dict[str, float] = {}
 _refresh_lock = threading.Lock()
 

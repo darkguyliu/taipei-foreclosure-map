@@ -14,24 +14,13 @@ logger = logging.getLogger(__name__)
 
 BASE_URL = "https://www.tpkonsale.moj.gov.tw"
 
-# Pagination runaway guard. Deliberately generous relative to any real
+# Pagination runaway guard, deliberately generous relative to any real
 # district's observed listing count (low dozens; a full page is ~10-11
-# rows) specifically so hitting it is a clear anomaly rather than a
-# normal "big district" — a tighter cap means a district that happens
-# to have exactly that many pages would raise PartialScrapeError (and
-# so never advance cache_meta) on every single refresh, forever, since
-# the result is legitimately complete but indistinguishable from "there
-# might be more" without this margin.
-#
-# Note this can't be fully eliminated, only made implausible: whatever
-# number is picked, a district whose true result set lands on exactly
-# that boundary would still be misjudged. The loop below fetches one
-# page past the cap to confirm before giving up, which only pushes the
-# unresolvable boundary from PAGE_CAP to PAGE_CAP + 1 — there is no
-# cap value immune to this short of removing the cap entirely, which
-# would reopen the actual runaway risk (a broken or malicious site that
-# never returns an empty page) this guards against.
-PAGE_CAP = 50
+# rows) so hitting it is a clear anomaly, not a normal "big district".
+# A district with exactly this many true pages is still misjudged as
+# partial (no finite cap can avoid that short of removing it entirely),
+# but that's implausible given real listing counts.
+PAGE_CAP = 51
 
 # Pause between page requests so a large (capped) scrape doesn't fire up
 # to ~100 rapid, unpaced requests (CAPTCHA + query per page) at the live
@@ -298,56 +287,67 @@ def scrape_district(district: str) -> list:
 
     all_rows = []
     page = 1
+
+    def _give_up_or_continue(exc):
+        """A failure in an *expected* category (network/HTTP error, bad
+        CAPTCHA JSON, no data table): on page 1 there's nothing collected
+        yet, so it's a real scrape failure. On page 2+, keep what's
+        already collected but signal the scrape as incomplete so the
+        caller doesn't treat it as a full success."""
+        if page == 1:
+            raise exc
+        logger.warning(
+            "Page %d failed for %s; stopping with %d rows collected",
+            page, district, len(all_rows), exc_info=True,
+        )
+        raise PartialScrapeError(all_rows) from exc
+
     while True:
         if page > 1:
             # Pace requests so a large (capped) scrape doesn't fire ~100
             # rapid, unpaced requests at the live site.
             time.sleep(PAGE_REQUEST_DELAY_SECONDS)
+
+        # Fetch a fresh CAPTCHA for every page; the code appears to be
+        # single-use/short-lived and reusing it causes later pages to fail.
         try:
-            # Fetch a fresh CAPTCHA for every page; the code appears to be
-            # single-use/short-lived and reusing it causes later pages to fail.
             captcha_resp = session.get(f"{BASE_URL}/Home/Captcha", timeout=15)
             captcha_resp.raise_for_status()
             captcha_code = captcha_resp.json()["code"]
+        except requests.RequestException as exc:
+            _give_up_or_continue(exc)
+        except (ValueError, KeyError) as exc:
+            # Bad/missing "code" in the CAPTCHA response body itself — a
+            # site-side anomaly, not a bug in this function. Scoped to
+            # just this call so a ValueError/KeyError from a *different*
+            # bug (e.g. inside parse_auction_rows below) isn't mistaken
+            # for the same thing.
+            _give_up_or_continue(exc)
 
-            params = {
-                "COUNTY": county_code,
-                "AREA": area_code,
-                "CAPTCHA": captcha_code,
-                "REQUERY": "false" if page == 1 else "true",
-                "PAGINATION_PAGE_NO": str(page),
-            }
+        params = {
+            "COUNTY": county_code,
+            "AREA": area_code,
+            "CAPTCHA": captcha_code,
+            "REQUERY": "false" if page == 1 else "true",
+            "PAGINATION_PAGE_NO": str(page),
+        }
+        try:
             resp = session.get(f"{BASE_URL}/Estate/Query", params=params, timeout=20)
             resp.raise_for_status()
+        except requests.RequestException as exc:
+            _give_up_or_continue(exc)
 
+        try:
             rows = parse_auction_rows(resp.text, district, city)
-        except (requests.RequestException, DataTableNotFoundError, ValueError, KeyError) as exc:
-            if page == 1:
-                raise  # no data at all — a real scrape failure, not "0 results"
-            # Already-collected pages are kept, but the caller must not
-            # treat this as a fully successful scrape (e.g. for cache_meta)
-            # since later pages may hold rows that were never collected.
-            # Limited to expected failure modes (network/HTTP errors, a
-            # missing table, bad CAPTCHA JSON) — anything else is a real
-            # bug in this code, not a scrape-time condition to recover
-            # from, so it should surface as a hard failure instead of
-            # quietly becoming "partial success".
-            logger.warning(
-                "Page %d failed for %s; stopping with %d rows collected",
-                page, district, len(all_rows), exc_info=True,
-            )
-            raise PartialScrapeError(all_rows) from exc
+        except DataTableNotFoundError as exc:
+            _give_up_or_continue(exc)
 
         all_rows.extend(rows)
 
         if not rows:
             break
         page += 1
-        if page > PAGE_CAP + 1:
-            # +1: fetch one page past the nominal cap to confirm before
-            # giving up, rather than stopping the instant the cap is
-            # reached — see the PAGE_CAP comment above for why this can
-            # only push the boundary out, not eliminate it.
+        if page > PAGE_CAP:
             logger.warning(
                 "Hit the %d-page safety cap for %s with %d rows collected",
                 PAGE_CAP, district, len(all_rows),

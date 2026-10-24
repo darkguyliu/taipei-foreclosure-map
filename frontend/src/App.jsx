@@ -86,9 +86,17 @@ export default function App() {
       }
       return
     }
-    // Reload after a short delay to allow background task to complete —
-    // cancelled in handleDistrictChange if the user has since moved on.
-    reloadTimerRef.current = setTimeout(() => window.location.reload(), 3000)
+    // Reload after a short delay to allow background task to complete.
+    // Guarded the same way as the failure branches above: if the user
+    // switched districts while this request was in flight,
+    // handleDistrictChange already ran and had nothing to cancel yet
+    // (this timer didn't exist until now) — scheduling it unconditionally
+    // here would reload onto whatever district they switched to. Once
+    // the timer *is* set, handleDistrictChange cancels it on any further
+    // switch.
+    if (districtRef.current === requestedDistrict) {
+      reloadTimerRef.current = setTimeout(() => window.location.reload(), 3000)
+    }
   }
 
   const displayProperties = activeTab === 'favorites'
