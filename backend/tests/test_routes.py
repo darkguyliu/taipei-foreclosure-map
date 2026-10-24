@@ -287,6 +287,37 @@ def test_run_refresh_survives_geocode_cache_failure(monkeypatch, caplog):
     assert "CACHEFAIL-001" in case_numbers  # still persisted, just without a cache hit
 
 
+def test_run_refresh_logs_normalize_failure_once_not_twice(monkeypatch, caplog):
+    rows = [{
+        "case_number": "NORMFAIL-001", "court": "台北地院", "district": "大安區",
+        "address": "台北市大安區仁愛路一段1號", "floor_price": 1_000_000,
+        "area": 10.0, "property_type": "住宅", "auction_count": 1,
+        "auction_date": "2026-05-01", "auction_url": "",
+    }]
+    monkeypatch.setattr(routes, "scrape_district", lambda district: rows)
+    monkeypatch.setattr(routes, "fetch_avg_prices", lambda district: [])
+    monkeypatch.setattr(routes, "GOOGLE_API_KEY", "")
+
+    def _boom(address):
+        raise ValueError("bad address")
+
+    monkeypatch.setattr(routes, "normalize_address", _boom)
+
+    with caplog.at_level(logging.WARNING, logger="routes"):
+        routes._run_refresh("大安區")
+
+    normalize_warnings = [r for r in caplog.records if "Failed to normalize" in r.message]
+    assert len(normalize_warnings) == 1  # not also re-logged in the per-row loop
+
+    conn = database.get_connection()
+    case_numbers = {
+        row["case_number"]
+        for row in conn.execute("SELECT case_number FROM properties").fetchall()
+    }
+    conn.close()
+    assert "NORMFAIL-001" not in case_numbers  # never persisted — no address_norm to key it on
+
+
 def test_run_refresh_does_not_raise_when_scrape_fails(monkeypatch, caplog):
     def _boom(district):
         raise RuntimeError("CAPTCHA fetch failed")

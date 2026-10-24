@@ -10,6 +10,7 @@ import { useFavorites } from './hooks/useFavorites'
 import './App.css'
 
 const MAPS_API_KEY = import.meta.env.VITE_GOOGLE_MAPS_API_KEY || ''
+const DISTRICT_STORAGE_KEY = 'foreclosure_district'
 
 const REFRESH_STATUS_MESSAGES = {
   400: '無效的行政區',
@@ -18,7 +19,16 @@ const REFRESH_STATUS_MESSAGES = {
 }
 
 export default function App() {
-  const [district, setDistrict] = useState('')
+  // Persisted so the post-refresh reload below doesn't drop the user back
+  // onto the district picker with no selection — the reload is still a
+  // full page load, but at least restores where they were.
+  const [district, setDistrict] = useState(() => {
+    try {
+      return localStorage.getItem(DISTRICT_STORAGE_KEY) || ''
+    } catch {
+      return ''
+    }
+  })
   const [filters, setFilters] = useState({})
   const [selectedProperty, setSelectedProperty] = useState(null)
   const [activeTab, setActiveTab] = useState('all') // 'all' | 'favorites'
@@ -39,6 +49,10 @@ export default function App() {
   // Pending post-success reload timer, so it can be cancelled if the user
   // switches districts before it fires (see handleDistrictChange).
   const reloadTimerRef = useRef(null)
+  // District with a /refresh request currently in flight, or null — so
+  // switching away and back to it restores the disabled button instead
+  // of re-enabling a click that would just come back as a 409.
+  const pendingRequestDistrictRef = useRef(null)
 
   // Clear any stale throttle/error message from the previous district —
   // otherwise it lingers on screen after switching districts. Done in the
@@ -48,8 +62,13 @@ export default function App() {
   function handleDistrictChange(newDistrict) {
     districtRef.current = newDistrict
     setDistrict(newDistrict)
+    try {
+      localStorage.setItem(DISTRICT_STORAGE_KEY, newDistrict)
+    } catch {
+      // ignore — persistence is a nice-to-have, not required to function
+    }
     setRefreshError('')
-    setRefreshing(false)
+    setRefreshing(pendingRequestDistrictRef.current === newDistrict)
     if (reloadTimerRef.current) {
       clearTimeout(reloadTimerRef.current)
       reloadTimerRef.current = null
@@ -59,12 +78,14 @@ export default function App() {
   async function handleRefresh() {
     if (!district || refreshing) return
     const requestedDistrict = district // snapshot — the user may switch away before this resolves
+    pendingRequestDistrictRef.current = requestedDistrict
     setRefreshError('')
     setRefreshing(true)
     let resp
     try {
       resp = await fetch(`/api/refresh?district=${encodeURIComponent(requestedDistrict)}`, { method: 'POST' })
     } catch {
+      if (pendingRequestDistrictRef.current === requestedDistrict) pendingRequestDistrictRef.current = null
       // Guard every bit of state this response touches against having
       // switched districts in the meantime — not just the error message,
       // or e.g. clearing `refreshing` here could re-enable the button for
@@ -78,6 +99,7 @@ export default function App() {
     if (!resp.ok) {
       // 429 (throttled) or 409 (already in progress) — don't reload, the
       // user needs to know nothing new was triggered.
+      if (pendingRequestDistrictRef.current === requestedDistrict) pendingRequestDistrictRef.current = null
       if (districtRef.current === requestedDistrict) {
         const retryAfter = resp.headers.get('Retry-After')
         const message = REFRESH_STATUS_MESSAGES[resp.status] || '刷新失敗'
@@ -86,6 +108,7 @@ export default function App() {
       }
       return
     }
+    if (pendingRequestDistrictRef.current === requestedDistrict) pendingRequestDistrictRef.current = null
     // Reload after a short delay to allow background task to complete.
     // Guarded the same way as the failure branches above: if the user
     // switched districts while this request was in flight,

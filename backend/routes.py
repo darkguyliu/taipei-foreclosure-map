@@ -239,9 +239,12 @@ def _run_refresh(district: str) -> None:
         geocode_cache = {}
     geocoded_new = geocoded_cached = failed = errored = 0
     for row, addr_norm in zip(rows, address_norms):
+        if addr_norm is None:
+            # Already logged with its traceback above, when normalization
+            # itself failed — nothing more to add by logging it again here.
+            errored += 1
+            continue
         try:
-            if addr_norm is None:
-                raise ValueError(f"Could not normalize address: {row.get('address')!r}")
             row["address_norm"] = addr_norm
 
             if addr_norm in geocode_cache:
