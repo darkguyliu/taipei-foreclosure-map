@@ -4,6 +4,7 @@ Uses GET /Estate/Query with CAPTCHA (code returned in API response).
 """
 import logging
 import re
+import time
 import requests
 from bs4 import BeautifulSoup
 from cities import get_city_for_district, get_county_code, get_area_code, KNOWN_CITY_PREFIXES
@@ -21,7 +22,21 @@ BASE_URL = "https://www.tpkonsale.moj.gov.tw"
 # so never advance cache_meta) on every single refresh, forever, since
 # the result is legitimately complete but indistinguishable from "there
 # might be more" without this margin.
+#
+# Note this can't be fully eliminated, only made implausible: whatever
+# number is picked, a district whose true result set lands on exactly
+# that boundary would still be misjudged. The loop below fetches one
+# page past the cap to confirm before giving up, which only pushes the
+# unresolvable boundary from PAGE_CAP to PAGE_CAP + 1 — there is no
+# cap value immune to this short of removing the cap entirely, which
+# would reopen the actual runaway risk (a broken or malicious site that
+# never returns an empty page) this guards against.
 PAGE_CAP = 50
+
+# Pause between page requests so a large (capped) scrape doesn't fire up
+# to ~100 rapid, unpaced requests (CAPTCHA + query per page) at the live
+# site, which risks tripping its own rate limiting or anti-bot measures.
+PAGE_REQUEST_DELAY_SECONDS = 0.5
 
 HEADERS = {
     "User-Agent": (
@@ -284,6 +299,10 @@ def scrape_district(district: str) -> list:
     all_rows = []
     page = 1
     while True:
+        if page > 1:
+            # Pace requests so a large (capped) scrape doesn't fire ~100
+            # rapid, unpaced requests at the live site.
+            time.sleep(PAGE_REQUEST_DELAY_SECONDS)
         try:
             # Fetch a fresh CAPTCHA for every page; the code appears to be
             # single-use/short-lived and reusing it causes later pages to fail.
@@ -302,15 +321,17 @@ def scrape_district(district: str) -> list:
             resp.raise_for_status()
 
             rows = parse_auction_rows(resp.text, district, city)
-        except Exception as exc:
+        except (requests.RequestException, DataTableNotFoundError, ValueError, KeyError) as exc:
             if page == 1:
                 raise  # no data at all — a real scrape failure, not "0 results"
             # Already-collected pages are kept, but the caller must not
             # treat this as a fully successful scrape (e.g. for cache_meta)
             # since later pages may hold rows that were never collected.
-            # Deliberately broad: a network timeout or bad CAPTCHA response
-            # on page 2+ shouldn't discard page 1 either, not just a
-            # missing-table parse failure.
+            # Limited to expected failure modes (network/HTTP errors, a
+            # missing table, bad CAPTCHA JSON) — anything else is a real
+            # bug in this code, not a scrape-time condition to recover
+            # from, so it should surface as a hard failure instead of
+            # quietly becoming "partial success".
             logger.warning(
                 "Page %d failed for %s; stopping with %d rows collected",
                 page, district, len(all_rows), exc_info=True,
@@ -322,10 +343,11 @@ def scrape_district(district: str) -> list:
         if not rows:
             break
         page += 1
-        if page > PAGE_CAP:
-            # There may well be more pages past this one, so treat it the
-            # same as a page breaking mid-pagination: the caller shouldn't
-            # mark this district as fully refreshed.
+        if page > PAGE_CAP + 1:
+            # +1: fetch one page past the nominal cap to confirm before
+            # giving up, rather than stopping the instant the cap is
+            # reached — see the PAGE_CAP comment above for why this can
+            # only push the boundary out, not eliminate it.
             logger.warning(
                 "Hit the %d-page safety cap for %s with %d rows collected",
                 PAGE_CAP, district, len(all_rows),

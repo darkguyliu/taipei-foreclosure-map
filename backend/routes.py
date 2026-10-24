@@ -286,11 +286,11 @@ def _run_refresh(district: str) -> None:
     # until the TTL expires, even though the refresh didn't fully succeed.
     # A geocoding failure alone doesn't hit the "all rows failed" path —
     # it's counted in `failed` and the row still persists with lat/lng null.
-    if not partial and (not rows or errored < len(rows)):
+    if partial:
+        pass  # already logged where PartialScrapeError was caught, above
+    elif not rows or errored < len(rows):
         upsert_cache_meta(district)
-    elif not partial:
-        # The partial case was already logged where PartialScrapeError
-        # was caught, above — no need to log the same outcome twice.
+    else:
         logger.error(
             "All %d scraped rows failed to process for %s; not updating cache_meta",
             len(rows), district,

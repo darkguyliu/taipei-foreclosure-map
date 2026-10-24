@@ -36,6 +36,9 @@ export default function App() {
   // running. Updated only in the event handler below (never during
   // render) since district only ever changes through it.
   const districtRef = useRef(district)
+  // Pending post-success reload timer, so it can be cancelled if the user
+  // switches districts before it fires (see handleDistrictChange).
+  const reloadTimerRef = useRef(null)
 
   // Clear any stale throttle/error message from the previous district —
   // otherwise it lingers on screen after switching districts. Done in the
@@ -47,6 +50,10 @@ export default function App() {
     setDistrict(newDistrict)
     setRefreshError('')
     setRefreshing(false)
+    if (reloadTimerRef.current) {
+      clearTimeout(reloadTimerRef.current)
+      reloadTimerRef.current = null
+    }
   }
 
   async function handleRefresh() {
@@ -58,26 +65,30 @@ export default function App() {
     try {
       resp = await fetch(`/api/refresh?district=${encodeURIComponent(requestedDistrict)}`, { method: 'POST' })
     } catch {
-      if (districtRef.current === requestedDistrict) setRefreshError('刷新失敗，請檢查網路連線')
-      setRefreshing(false)
+      // Guard every bit of state this response touches against having
+      // switched districts in the meantime — not just the error message,
+      // or e.g. clearing `refreshing` here could re-enable the button for
+      // a district whose own, still-in-flight request hasn't resolved.
+      if (districtRef.current === requestedDistrict) {
+        setRefreshError('刷新失敗，請檢查網路連線')
+        setRefreshing(false)
+      }
       return
     }
     if (!resp.ok) {
       // 429 (throttled) or 409 (already in progress) — don't reload, the
-      // user needs to know nothing new was triggered. Only show this if
-      // they're still looking at the district it's actually about —
-      // otherwise a slow response for a district they've since left
-      // would show up as an error on whatever they switched to instead.
+      // user needs to know nothing new was triggered.
       if (districtRef.current === requestedDistrict) {
         const retryAfter = resp.headers.get('Retry-After')
         const message = REFRESH_STATUS_MESSAGES[resp.status] || '刷新失敗'
         setRefreshError(retryAfter ? `${message}（請 ${retryAfter} 秒後再試）` : message)
+        setRefreshing(false)
       }
-      setRefreshing(false)
       return
     }
-    // Reload after a short delay to allow background task to complete
-    setTimeout(() => window.location.reload(), 3000)
+    // Reload after a short delay to allow background task to complete —
+    // cancelled in handleDistrictChange if the user has since moved on.
+    reloadTimerRef.current = setTimeout(() => window.location.reload(), 3000)
   }
 
   const displayProperties = activeTab === 'favorites'

@@ -7,6 +7,14 @@ from scraper import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _no_real_sleeps(monkeypatch):
+    # scrape_district paces real requests with time.sleep between pages;
+    # none of these tests hit a real site, and the page-cap tests loop
+    # ~50 times, so this keeps the suite fast and deterministic.
+    monkeypatch.setattr(scraper_module.time, "sleep", lambda seconds: None)
+
+
 class _FakeResp:
     def __init__(self, json_data=None, text=""):
         self._json = json_data
@@ -180,9 +188,13 @@ def test_scrape_district_keeps_earlier_pages_if_a_later_page_has_no_table(monkey
 
 
 def test_scrape_district_treats_any_later_page_failure_as_partial(monkeypatch):
-    # Not just DataTableNotFoundError — a network timeout, a bad CAPTCHA
-    # response, or any other failure on page 2+ must also preserve
-    # earlier pages instead of discarding them as a total scrape failure.
+    # Not just DataTableNotFoundError — a network-level failure on page 2+
+    # must also preserve earlier pages instead of discarding them as a
+    # total scrape failure. Uses requests.RequestException specifically,
+    # since that (along with DataTableNotFoundError/ValueError/KeyError)
+    # is one of the expected failure modes this now narrows to catching —
+    # a plain builtin exception would be a bug in this code and should
+    # propagate instead of becoming "partial success".
     monkeypatch.setattr(scraper_module.requests, "Session", _FakeSession)
 
     page1_rows = [{"case_number": "P1-1"}]
@@ -192,13 +204,36 @@ def test_scrape_district_treats_any_later_page_failure_as_partial(monkeypatch):
         calls["n"] += 1
         if calls["n"] == 1:
             return page1_rows
-        raise ConnectionError("network blip")
+        raise scraper_module.requests.exceptions.ConnectionError("network blip")
 
     monkeypatch.setattr(scraper_module, "parse_auction_rows", _fake_parse)
 
     with pytest.raises(scraper_module.PartialScrapeError) as exc_info:
         scraper_module.scrape_district("大安區")
     assert exc_info.value.rows == page1_rows
+
+
+def test_scrape_district_does_not_swallow_a_real_bug_as_partial(monkeypatch):
+    # A programming error (e.g. a KeyError-free TypeError from a bug in
+    # parse_auction_rows itself) is not one of the expected failure modes
+    # and must propagate as a hard failure, not get quietly downgraded to
+    # "partial success" with just a warning log — that would hide a real
+    # bug behind cache_meta simply never updating.
+    monkeypatch.setattr(scraper_module.requests, "Session", _FakeSession)
+
+    page1_rows = [{"case_number": "P1-1"}]
+    calls = {"n": 0}
+
+    def _fake_parse(html, district, city=None):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return page1_rows
+        raise TypeError("bug: unsupported operand")
+
+    monkeypatch.setattr(scraper_module, "parse_auction_rows", _fake_parse)
+
+    with pytest.raises(TypeError):
+        scraper_module.scrape_district("大安區")
 
 
 def test_scrape_district_raises_if_first_page_has_no_table(monkeypatch):
@@ -218,7 +253,9 @@ def test_scrape_district_treats_page_cap_as_partial(monkeypatch):
     # Hitting the page-count safety cap means there may well be more pages
     # left unread — that's incomplete, not a confirmed full result, so it
     # must raise PartialScrapeError just like a mid-pagination table miss
-    # does, rather than silently returning as if nothing were missed.
+    # does, rather than silently returning as if nothing were missed. The
+    # loop fetches one page past PAGE_CAP to confirm before giving up, so
+    # with every page non-empty it collects PAGE_CAP + 1 rows, not PAGE_CAP.
     monkeypatch.setattr(scraper_module.requests, "Session", _FakeSession)
     monkeypatch.setattr(
         scraper_module, "parse_auction_rows",
@@ -227,28 +264,27 @@ def test_scrape_district_treats_page_cap_as_partial(monkeypatch):
 
     with pytest.raises(scraper_module.PartialScrapeError) as exc_info:
         scraper_module.scrape_district("大安區")
-    assert len(exc_info.value.rows) == scraper_module.PAGE_CAP
+    assert len(exc_info.value.rows) == scraper_module.PAGE_CAP + 1
 
 
 def test_scrape_district_does_not_treat_a_legitimately_complete_district_as_partial(monkeypatch):
-    # A district whose true page count happens to land exactly on the cap
-    # boundary must not be permanently misjudged as partial — the cap is
-    # set generously above any real district's observed listing count
-    # specifically so this (an empty page right after a full one, within
-    # the cap) is what real complete results look like.
+    # A district whose true result set lands exactly on the cap boundary
+    # (PAGE_CAP full pages, then a genuinely empty next page) must not be
+    # misjudged as partial — this is exactly the case the one-extra-page
+    # confirmatory fetch exists to resolve.
     monkeypatch.setattr(scraper_module.requests, "Session", _FakeSession)
     calls = {"n": 0}
 
     def _fake_parse(html, district, city=None):
         calls["n"] += 1
-        # One row per page up to (but not including) the cap, then empty —
-        # a normal "ran out of results" ending well inside the margin.
-        return [{"case_number": f"P{calls['n']}"}] if calls["n"] <= scraper_module.PAGE_CAP - 1 else []
+        # Exactly PAGE_CAP full pages, then empty — real pagination ending
+        # right at the boundary the cap is meant to allow for.
+        return [{"case_number": f"P{calls['n']}"}] if calls["n"] <= scraper_module.PAGE_CAP else []
 
     monkeypatch.setattr(scraper_module, "parse_auction_rows", _fake_parse)
 
     rows = scraper_module.scrape_district("大安區")  # must not raise
-    assert len(rows) == scraper_module.PAGE_CAP - 1
+    assert len(rows) == scraper_module.PAGE_CAP
 
 
 NO_MAPS_LINK_HTML = """
