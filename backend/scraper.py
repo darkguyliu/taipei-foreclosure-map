@@ -205,11 +205,12 @@ class DataTableNotFoundError(RuntimeError):
 
 
 class PartialScrapeError(RuntimeError):
-    """Pagination stopped early (page 2+) because the data table couldn't
-    be found on a later page. Carries whatever rows were already collected
-    via .rows — the caller can still persist them, but should treat the
-    scrape as incomplete (e.g. skip cache_meta) rather than fully successful,
-    since further rows may exist on the page that failed to parse.
+    """Pagination stopped early (page 2+), before genuinely running out of
+    pages — a CAPTCHA/network failure, the data table going missing on a
+    later page, or hitting PAGE_CAP. Carries whatever rows were already
+    collected via .rows — the caller can still persist them, but should
+    treat the scrape as incomplete (e.g. skip cache_meta) rather than fully
+    successful, since further rows may exist on pages this run never saw.
     """
 
     def __init__(self, rows):

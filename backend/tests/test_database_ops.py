@@ -175,11 +175,12 @@ def test_get_geocode_cache_prefers_most_recently_updated_coords():
     assert cache[addr] == (25.02, 121.02)
 
 
-def test_get_geocode_cache_breaks_same_second_tie_by_id():
-    # updated_at only has second resolution, so two rows written within
-    # the same wall-clock second would otherwise sort in whatever order
-    # SQLite happens to return them. id (insertion order) must break the
-    # tie deterministically — the higher id (written later) wins.
+def test_get_geocode_cache_breaks_same_second_tie_by_millisecond():
+    # updated_at is written with millisecond precision specifically so two
+    # rows updated within the same wall-clock second still sort
+    # deterministically by actual recency (id can't substitute here — an
+    # ON CONFLICT DO UPDATE leaves a row's id unchanged, so it doesn't
+    # track write recency across re-scrapes of the same address).
     addr = "台北市大安區同秒路1號"
     upsert_property({
         "case_number": "TIE-OLD", "court": "台北地院", "district": "大安區",
@@ -195,9 +196,11 @@ def test_get_geocode_cache_breaks_same_second_tie_by_id():
         "floor_price": 1_000_000, "area": 10.0, "property_type": "住宅",
         "auction_count": 1, "auction_date": "2026-04-01", "auction_url": "",
     })
-    # Pin both rows to the exact same updated_at so only id can break the tie.
+    # Pin both rows to the same whole second but different milliseconds —
+    # same-second ties must still resolve by the finer-grained timestamp.
     conn = get_connection()
-    conn.execute("UPDATE properties SET updated_at = '2020-01-01 00:00:00' WHERE address_norm = ?", (addr,))
+    conn.execute("UPDATE properties SET updated_at = '2020-01-01 00:00:00.100' WHERE case_number = 'TIE-OLD'")
+    conn.execute("UPDATE properties SET updated_at = '2020-01-01 00:00:00.900' WHERE case_number = 'TIE-NEW'")
     conn.commit()
     conn.close()
 
